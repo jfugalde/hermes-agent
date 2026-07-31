@@ -792,6 +792,22 @@ wheels = [
 ]
 
 [[package]]
+name = "cursor-sdk"
+version = "1.0.26"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/7d/15d31f5f2e723c41a2602342ef83e80978847a85bdb5af2722a688b50bf3/cursor_sdk-1.0.26.tar.gz", hash = "sha256:cd4bdf0b44bc61b517c78efc11e2a2b3bbb701f06d6b4b1b55107df9572ada04", size = 1176, upload-time = "2026-07-28T21:25:28.168Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/08/bfbbb547e77a5e357fcf1bc3ede9c2caaad1fe2a089710e66cba5e71d04b/cursor_sdk-1.0.26-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fa2d3250ca257b788f6ad2336d41dc359b6523648f3481ed1f145603a04641a3", size = 47573952, upload-time = "2026-07-28T21:25:12.759Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/b2/a8bb2e6754ddea9f0e17a2bd81090177855d423f64d55c7e84e79052755b/cursor_sdk-1.0.26-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:bbae2ded8213b3c150f5f4e26b89461e04b7eacd053c772304df2adb630cc0a6", size = 49071279, upload-time = "2026-07-28T21:25:16.613Z" },
+    { url = "https://files.pythonhosted.org/packages/48/0d/93077a5028ece54ded3796239a9a3cf7a721252473c05e79f92caaa2d82b/cursor_sdk-1.0.26-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:6d0a64fd3a8904efd738836aad08fb95ee84047757fd09dde6c9668cc5ae2de4", size = 56161125, upload-time = "2026-07-28T21:25:20.11Z" },
+    { url = "https://files.pythonhosted.org/packages/76/d8/99d0b9b9e26428b3d06dd1d359dfc6b51bb3755f31a2e7271a3c03feca23/cursor_sdk-1.0.26-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ba6d1c0c4a5d905f82aa04bf034cf8fa17a6b0f9a9b938eab47735913c1f8482", size = 56830391, upload-time = "2026-07-28T21:25:23.229Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/b5/abd7b25c67b99c922b357bd041c99e3f6663c8548b9ce39d56c1a45ccf42/cursor_sdk-1.0.26-py3-none-win_amd64.whl", hash = "sha256:6c81e0a2244574a59892e34a3cefef496d22e584df5678e6b79ac418ccdc286f", size = 43592680, upload-time = "2026-07-28T21:25:26.167Z" },
+]
+
+[[package]]
 name = "darabonba-core"
 version = "1.0.8"
 source = { registry = "https://pypi.org/simple" }
@@ -1589,6 +1605,9 @@ computer-use = [
     { name = "mcp" },
     { name = "starlette" },
 ]
+cursor = [
+    { name = "cursor-sdk" },
+]
 daytona = [
     { name = "daytona" },
 ]
@@ -1752,6 +1771,7 @@ requires-dist = [
     { name = "concurrent-log-handler", marker = "sys_platform == 'win32'", specifier = "==0.9.29" },
     { name = "croniter", specifier = "==6.0.0" },
     { name = "cryptography", specifier = "==48.0.1" },
+    { name = "cursor-sdk", marker = "extra == 'cursor'", specifier = ">=0.1.0,<2" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = "==0.155.0" },
     { name = "debugpy", marker = "extra == 'dev'", specifier = "==1.8.20" },
     { name = "defusedxml", marker = "extra == 'wecom'", specifier = "==0.7.1" },
@@ -1855,7 +1875,7 @@ requires-dist = [
     { name = "websockets", specifier = "==15.0.1" },
     { name = "youtube-transcript-api", marker = "extra == 'youtube'", specifier = "==1.2.4" },
 ]
-provides-extras = ["anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "hindsight", "dev", "messaging", "cron", "slack", "matrix", "wecom", "cli", "tts-premium", "voice", "honcho", "supermemory", "mem0", "vision", "pty", "mcp", "nemo-relay", "homeassistant", "sms", "teams", "computer-use", "acp", "mistral", "bedrock", "vertex", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "youtube", "web", "all"]
+provides-extras = ["anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "hindsight", "dev", "messaging", "cron", "slack", "matrix", "wecom", "cli", "cursor", "tts-premium", "voice", "honcho", "supermemory", "mem0", "vision", "pty", "mcp", "nemo-relay", "homeassistant", "sms", "teams", "computer-use", "acp", "mistral", "bedrock", "vertex", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "youtube", "web", "all"]
 
 [[package]]
 name = "hf-xet"
@@ -2607,6 +2627,8 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/25/65/d320016505457cc30971f575e8dadffb923b7cfc780ab8bb25a4ce9d305c/nemo_relay-0.6.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:ad5dae6febf6532d7b113abc2a404679c8feffc499df3034b93d9a078185d2bb", size = 9917779, upload-time = "2026-07-22T20:07:48.961Z" },
     { url = "https://files.pythonhosted.org/packages/ae/c0/f33250e71c4206da1b339072893f9a1e39295fe1aceb9a2fef4b8620a0f2/nemo_relay-0.6.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c0cd9570f64c6956fe3bfb82af1cdb3ee70cb50b51098cdb0de831c3f9b4e904", size = 8888375, upload-time = "2026-07-22T20:07:51.049Z" },
     { url = "https://files.pythonhosted.org/packages/a3/f4/d1dfaed022da0f6f14765a122867f976a69cc520fe1faaf99757f5719d1f/nemo_relay-0.6.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:849daa9e45158ac581e54506e0fcc7a24f557d1ed06dbdc074f5de7a00393cbc", size = 9336372, upload-time = "2026-07-22T20:07:53.224Z" },
+    { url = "https://files.pythonhosted.org/packages/60/9e/f8b80509eef5e05702b940a3d1e2f60c962548d87dec2d712fd3804e6cd4/nemo_relay-0.6.0-cp311-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:8c80e534b76bb0455cfc222aaf5c10fa064c088b3c0d5e137eb3c97db46dbc47", size = 10578834, upload-time = "2026-07-30T15:44:44.726Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/a0/84ee49d45a1a874457f2f9260d30fd573af30c9be360d9d97b8bb7835ad9/nemo_relay-0.6.0-cp311-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:c8bc4a792a2f8c35ddef1b900cc43be2b2bbbfcd5e7cf65aa0829c04d25eb77f", size = 10849651, upload-time = "2026-07-30T15:44:40.48Z" },
     { url = "https://files.pythonhosted.org/packages/3a/b0/908d77f75b9054e1e403da78f7d9430249a45939070d4298abbb41a04b5b/nemo_relay-0.6.0-cp311-abi3-win_amd64.whl", hash = "sha256:bfbbedfd130fa95c9b8c04643c30910df850e0ed3500beeab82b00ca2d94e7ea", size = 9613425, upload-time = "2026-07-22T20:07:55.175Z" },
     { url = "https://files.pythonhosted.org/packages/cd/71/c438b9d746303ff7f270d99f13b250bf947cdac3e52de2a83fd132cbca0b/nemo_relay-0.6.0-cp311-abi3-win_arm64.whl", hash = "sha256:82fe132943399d89e6ec34dc28df0be7bbe41b84f6698c545928b8816b6010f6", size = 9034810, upload-time = "2026-07-22T20:07:57.467Z" },
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -22,12 +23,20 @@ class CursorAgentClientTests(unittest.TestCase):
             SimpleNamespace(id="composer-2.5"),
             SimpleNamespace(id="grok-4.5"),
         ]
-        with patch("cursor_sdk.Cursor") as mock_cursor:
-            mock_cursor.models.list.return_value = live
+        # cursor_sdk is an optional extra, not installed in the base/dev/all
+        # test env, so `patch("cursor_sdk.Cursor")` has nothing real to
+        # patch. Inject a fake module into sys.modules instead — this
+        # matches how `list_cursor_model_ids`'s lazy `from cursor_sdk import
+        # Cursor` resolves at call time, without requiring the real package.
+        mock_cursor = MagicMock()
+        mock_cursor.models.list.return_value = live
+        fake_module = SimpleNamespace(Cursor=mock_cursor)
+        with patch.dict(sys.modules, {"cursor_sdk": fake_module}):
             models = list_cursor_model_ids(api_key="test-key")
         self.assertEqual(models[0], "auto")
         self.assertIn("composer-2.5", models)
         self.assertIn("grok-4.5", models)
+
 
     def test_missing_api_key_raises(self) -> None:
         client = CursorAgentClient(api_key="")
