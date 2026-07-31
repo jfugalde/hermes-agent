@@ -590,6 +590,15 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
         return False
     if cleaned.lower() in _PLACEHOLDER_SECRET_VALUES:
         return False
+    # An unresolved 1Password reference (e.g. "op://Vault/Item/field") is a
+    # pointer, not a credential — callers that don't run it through the
+    # secrets resolver would otherwise send the literal URL as an API key.
+    # credential_pool._get_env_prefer_dotenv() already special-cases this for
+    # the env-seeding path; treat it the same way here so every other
+    # has_usable_secret() call site (provider auth, runtime_provider, gateway
+    # startup guards) rejects it too instead of needing its own check.
+    if cleaned.startswith("op://"):
+        return False
     return True
 
 
