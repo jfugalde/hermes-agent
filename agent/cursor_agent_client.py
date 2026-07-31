@@ -133,6 +133,35 @@ def _is_bridge_death_error(exc: Exception) -> bool:
     )
 
 
+def _is_key_exhaustion_error(exc: Exception) -> bool:
+    """Detect quota/auth failures on the current key that a second key might clear.
+
+    Deliberately broader than bridge-death: covers cloud-side rejections
+    (quota exhausted, rate limited, unauthorized) plus the generic
+    "model provider attempt timeout" the SDK returns when it swallows the
+    real upstream error. Retrying the SAME key on these is pointless; only
+    a different key (CURSOR_API_KEY_FALLBACK) can help.
+    """
+    msg = str(exc).lower()
+    return any(
+        x in msg
+        for x in (
+            "model provider attempt timeout",
+            "model_provider_attempt_timeout",
+            "attempt timeout",
+            "provider timeout",
+            "api timeout",
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "forbidden",
+        )
+    )
+
+
 def _reset_cursor_bridge() -> None:
     """Force the cursor_sdk to discard its cached dead bridge."""
     try:
@@ -180,6 +209,8 @@ class CursorAgentClient:
         **_: Any,
     ):
         self.api_key = (api_key or os.getenv("CURSOR_API_KEY", "")).strip()
+        self._fallback_api_key = os.getenv("CURSOR_API_KEY_FALLBACK", "").strip()
+        self._used_fallback = False
         self.base_url = base_url or CURSOR_MARKER_BASE_URL
         self._default_headers = dict(default_headers or {})
         self._cwd = str(Path(cwd or os.getcwd()).resolve())
@@ -264,9 +295,32 @@ class CursorAgentClient:
         )
 
     def _run_prompt(self, prompt: str, *, model_id: str) -> str:
+        """Run a prompt, retrying once on CURSOR_API_KEY_FALLBACK if the
+        primary key is exhausted/rejected (quota, rate limit, auth, or the
+        generic 'model provider attempt timeout' the SDK surfaces for
+        cloud-side failures). Bridge-death is handled inside
+        ``_run_prompt_with_key`` and does not consume a key retry.
+        """
+        try:
+            text = self._run_prompt_with_key(prompt, model_id=model_id, api_key=self.api_key)
+            self._used_fallback = False
+            return text
+        except Exception as exc:
+            if not self._fallback_api_key or self._used_fallback:
+                raise
+            if not _is_key_exhaustion_error(exc):
+                raise
+            _reset_cursor_bridge()
+            text = self._run_prompt_with_key(
+                prompt, model_id=model_id, api_key=self._fallback_api_key
+            )
+            self._used_fallback = True
+            return text
+
+    def _run_prompt_with_key(self, prompt: str, *, model_id: str, api_key: str) -> str:
         Agent, AgentOptions, LocalAgentOptions = _import_cursor_sdk()
         options = AgentOptions(
-            api_key=self.api_key,
+            api_key=api_key,
             model=model_id,
             local=LocalAgentOptions(cwd=self._cwd),
         )
