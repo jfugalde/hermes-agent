@@ -202,6 +202,16 @@ _USAGE_LIMIT_PATTERNS = [
     "key limit exceeded",
 ]
 
+# Narrower than _USAGE_LIMIT_PATTERNS on purpose: "limit exceeded" / "key
+# limit exceeded" also show up verbatim in ordinary rate-limit messages
+# ("Rate limit exceeded: too many requests"), so using the full list here
+# would misclassify a genuine transient 429 as billing. Only "quota" /
+# "usage limit" reliably signal a hard quota wall (e.g. Copilot).
+_HARD_QUOTA_WALL_PATTERNS = [
+    "usage limit",
+    "quota",
+]
+
 # Patterns confirming usage limit is transient (not billing)
 _USAGE_LIMIT_TRANSIENT_SIGNALS = [
     "try again",
@@ -1073,6 +1083,22 @@ def _classify_by_status(
                 should_fallback=True,
                 error_context=ctx,
             )
+        # Hard quota / usage-limit walls (e.g. Copilot "quota exceeded") arrive
+        # as HTTP 429 without a transient "try again / resets at" signal.
+        # Treat them like billing so we fail over instead of sleeping on
+        # Retry-After for up to 600s. Transient quota messages keep rate_limit.
+        has_usage_limit = any(p in error_msg for p in _HARD_QUOTA_WALL_PATTERNS)
+        if has_usage_limit:
+            has_transient_signal = any(
+                p in error_msg for p in _USAGE_LIMIT_TRANSIENT_SIGNALS
+            )
+            if not has_transient_signal:
+                return result_fn(
+                    FailoverReason.billing,
+                    retryable=False,
+                    should_rotate_credential=True,
+                    should_fallback=True,
+                )
         return result_fn(
             FailoverReason.rate_limit,
             retryable=True,
