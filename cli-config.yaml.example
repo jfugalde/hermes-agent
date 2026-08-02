@@ -564,7 +564,7 @@ prompt_caching:
 # The HERMES_SEMANTIC_CACHE_ENABLED env var overrides this setting when set.
 # semantic_cache:
 #   enabled: false
-#   ttl_seconds: 3600 # how long a cached response stays eligible for reuse
+#   ttl_seconds: 300 # how long a cached response stays eligible for reuse (5 minutes default)
 
 # =============================================================================
 # Auxiliary Models (Advanced — Experimental)

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 _ENV_FLAG = "HERMES_SEMANTIC_CACHE_ENABLED"
-_DEFAULT_TTL_SECONDS = 3600
+_DEFAULT_TTL_SECONDS = 300  # 5 minutes for chat responses by default
 _MAX_PROMPT_CHARS = 2000
 
 # Conservative "this is not a safe cache candidate" heuristic. Any match

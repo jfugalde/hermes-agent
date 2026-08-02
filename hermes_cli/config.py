@@ -1601,7 +1601,7 @@ DEFAULT_CONFIG = {
     # _maybe_get_cached_agent_result().
     "semantic_cache": {
         "enabled": False,
-        "ttl_seconds": 3600,
+        "ttl_seconds": 300,  # 5 minutes for chat responses by default
     },
 
     # OpenRouter-specific settings.
