@@ -10,6 +10,7 @@ end-to-end smoke test against a real embedding model.
 """
 
 import asyncio
+import logging
 
 import pytest
 from unittest.mock import patch
@@ -85,6 +86,69 @@ class TestSemanticCacheLookupSync:
         assert called_toolsets == ["shell"]
 
 
+class TestSemanticCacheHistoryGate:
+    """The cache must only apply to brand-new or very short single-turn
+    conversations; any prior assistant/tool turn makes the request stateful
+    and ineligible."""
+
+    @pytest.fixture(autouse=True)
+    def _enabled_cfg(self):
+        self.cfg = {"semantic_cache": {"enabled": True}}
+
+    def test_empty_history_is_eligible(self):
+        fake_cache = _FakeCache(response="4")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            result = _semantic_cache_lookup_sync("What is 2+2?", [], self.cfg, history=[])
+        assert result == "4"
+
+    def test_single_prior_user_message_is_eligible(self):
+        fake_cache = _FakeCache(response="4")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            result = _semantic_cache_lookup_sync(
+                "What is 2+2?",
+                [],
+                self.cfg,
+                history=[{"role": "user", "content": "hello"}],
+            )
+        assert result == "4"
+
+    def test_prior_assistant_message_disqualifies(self):
+        fake_cache = _FakeCache(response="should not be used")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            result = _semantic_cache_lookup_sync(
+                "What is 2+2?",
+                [],
+                self.cfg,
+                history=[{"role": "assistant", "content": "hi"}],
+            )
+        assert result is None
+
+    def test_tool_message_in_history_disqualifies(self):
+        fake_cache = _FakeCache(response="should not be used")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            result = _semantic_cache_lookup_sync(
+                "What is 2+2?",
+                [],
+                self.cfg,
+                history=[{"role": "tool", "content": "result", "tool_call_id": "1"}],
+            )
+        assert result is None
+
+    def test_multiple_prior_messages_disqualifies(self):
+        fake_cache = _FakeCache(response="should not be used")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            result = _semantic_cache_lookup_sync(
+                "What is 2+2?",
+                [],
+                self.cfg,
+                history=[
+                    {"role": "user", "content": "a"},
+                    {"role": "user", "content": "b"},
+                ],
+            )
+        assert result is None
+
+
 class TestMaybeGetCachedAgentResult:
     def test_disabled_by_default_returns_none(self):
         with patch("agent.semantic_response_cache.is_cache_enabled", return_value=False):
@@ -157,6 +221,45 @@ class TestMaybeGetCachedAgentResult:
 
         assert result is None
         mock_get_cache.assert_not_called()
+
+    def test_multi_turn_history_never_short_circuits(self):
+        """A prior assistant turn makes the conversation stateful and must
+        never be served from cache, even when the prompt text is cacheable."""
+        fake_cache = _FakeCache(response="should not be used")
+        cfg = {"semantic_cache": {"enabled": True}}
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            result = _run(
+                _maybe_get_cached_agent_result(
+                    "What is 2+2?",
+                    [],
+                    cfg,
+                    history=[{"role": "assistant", "content": "hi"}],
+                )
+            )
+
+        assert result is None
+
+
+class TestSemanticCacheLogging:
+    """Every enabled/eligible cache hit and miss must be visible at INFO."""
+
+    def test_cache_hit_is_logged(self, caplog):
+        fake_cache = _FakeCache(response="4")
+        cfg = {"semantic_cache": {"enabled": True}}
+        caplog.set_level(logging.INFO, logger="gateway.run")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            _semantic_cache_lookup_sync("What is 2+2?", [], cfg)
+
+        assert any("Semantic cache HIT" in rec.message for rec in caplog.records)
+
+    def test_cache_miss_is_logged(self, caplog):
+        fake_cache = _FakeCache(response=None)
+        cfg = {"semantic_cache": {"enabled": True}}
+        caplog.set_level(logging.INFO, logger="gateway.run")
+        with patch("agent.semantic_response_cache.get_cache", return_value=fake_cache):
+            _semantic_cache_lookup_sync("What is the airspeed of a swallow?", [], cfg)
+
+        assert any("Semantic cache MISS" in rec.message for rec in caplog.records)
 
 
 class TestSemanticCacheStoreSync:

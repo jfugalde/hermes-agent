@@ -3218,6 +3218,7 @@ def _semantic_cache_lookup_sync(
     message: str,
     toolsets: Optional[List[str]],
     cfg: dict,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """Blocking cache-eligibility check + lookup. Run off the event loop.
 
@@ -3227,14 +3228,22 @@ def _semantic_cache_lookup_sync(
     feature flag (``HERMES_SEMANTIC_CACHE_ENABLED`` / ``semantic_cache.enabled``).
     Returns ``None`` on disabled/ineligible/miss/any error — callers must
     treat ``None`` as "run the real agent", never as an error to surface.
+
+    Logs every enabled/eligible hit and miss at INFO level so the cache path
+    is visible in gateway logs.
     """
     from agent.semantic_response_cache import get_cache, is_cache_eligible, is_cache_enabled
 
     if not is_cache_enabled(cfg):
         return None
-    if not is_cache_eligible(message, toolsets, cfg):
+    if not is_cache_eligible(message, toolsets, cfg, history=history):
         return None
-    return get_cache().get(message)
+    cached_response = get_cache().get(message)
+    if cached_response:
+        logger.info("Semantic cache HIT for message: %r", message[:80])
+    else:
+        logger.info("Semantic cache MISS for message: %r", message[:80])
+    return cached_response
 
 
 def _semantic_cache_store_sync(
@@ -3242,6 +3251,7 @@ def _semantic_cache_store_sync(
     response: str,
     toolsets: Optional[List[str]],
     cfg: dict,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Blocking cache-eligibility check + write. Run off the event loop.
 
@@ -3250,11 +3260,12 @@ def _semantic_cache_store_sync(
     served by ``_maybe_get_cached_agent_result`` without a provider call.
     Uses the exact same eligibility gate as the lookup path, so a response
     is only ever stored for turns that could also have been served from
-    cache (no toolsets, short/non-code/non-tool prompt, feature enabled).
+    cache (no toolsets, short/non-code/non-tool prompt, feature enabled,
+    no prior conversation history).
     """
     from agent.semantic_response_cache import get_cache, get_cache_ttl, is_cache_eligible
 
-    if not is_cache_eligible(message, toolsets, cfg):
+    if not is_cache_eligible(message, toolsets, cfg, history=history):
         return
     get_cache().store(message, response, get_cache_ttl(cfg))
 
@@ -3263,14 +3274,16 @@ async def _maybe_get_cached_agent_result(
     message: str,
     toolsets: Optional[List[str]],
     cfg: dict,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Best-effort semantic-cache short-circuit for a plain-chat turn.
 
     Returns a minimal ``agent_result``-shaped dict (see ``_run_agent_inner``'s
     documented return contract) when — and only when — the semantic cache is
     enabled, the turn is eligible (no toolsets, short/non-code/non-tool
-    prompt; see ``agent.semantic_response_cache.is_cache_eligible``), and a
-    sufficiently similar prompt (cosine similarity above
+    prompt, no prior conversation history; see
+    ``agent.semantic_response_cache.is_cache_eligible``), and a sufficiently
+    similar prompt (cosine similarity above
     ``clawmem_semantic_cache.SIMILARITY_THRESHOLD``) is already cached.
 
     Returns ``None`` in every other case — disabled (the default), ineligible
@@ -3283,7 +3296,7 @@ async def _maybe_get_cached_agent_result(
     """
     try:
         cached_response = await asyncio.to_thread(
-            _semantic_cache_lookup_sync, message, toolsets, cfg
+            _semantic_cache_lookup_sync, message, toolsets, cfg, history
         )
     except Exception as exc:
         logger.debug("Semantic cache lookup failed (non-fatal): %s", exc)
@@ -14242,8 +14255,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # disabled, ineligible, a miss, or on any error this is a no-op
             # and falls straight through to the normal _run_agent() call
             # below with zero behavior change. Never applies to turns with
-            # any toolset enabled, so it cannot short-circuit tool calls,
-            # code generation, or state-changing commands.
+            # any toolset enabled or any prior conversation history, so it
+            # cannot short-circuit tool calls, code generation, multi-turn
+            # agent conversations, or state-changing commands.
             agent_result = None
             try:
                 from hermes_cli.tools_config import _get_platform_tools
@@ -14253,7 +14267,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _get_platform_tools(_cache_cfg, _platform_config_key(source.platform))
                 )
                 agent_result = await _maybe_get_cached_agent_result(
-                    message_text, _cache_toolsets, _cache_cfg
+                    message_text, _cache_toolsets, _cache_cfg, history=history
                 )
             except Exception as _cache_gate_err:
                 logger.debug(
@@ -14334,6 +14348,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         response,
                         locals().get("_cache_toolsets"),
                         locals().get("_cache_cfg") or {},
+                        history,
                     )
             except Exception as _cache_store_err:
                 logger.debug(

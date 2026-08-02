@@ -34,6 +34,7 @@ from typing import Any, Optional
 _ENV_FLAG = "HERMES_SEMANTIC_CACHE_ENABLED"
 _DEFAULT_TTL_SECONDS = 300  # 5 minutes for chat responses by default
 _MAX_PROMPT_CHARS = 2000
+_MAX_HISTORY_MESSAGES = 1  # allow a single prior user message at most
 
 # Conservative "this is not a safe cache candidate" heuristic. Any match
 # disqualifies the prompt — false negatives (skipping a cacheable prompt)
@@ -115,6 +116,7 @@ def is_cache_eligible(
     prompt: str,
     toolsets: Optional[list[str]],
     cfg: Optional[dict],
+    history: Optional[list[dict]] = None,
 ) -> bool:
     """Narrow allowlist gate: only short, tool-free, non-code Q&A prompts.
 
@@ -123,6 +125,11 @@ def is_cache_eligible(
     when none was given) — a non-empty list means the agent has tool access
     for this turn and is disqualified, regardless of what the prompt text
     looks like.
+
+    ``history`` guards against multi-turn or stateful conversations. Only an
+    empty history or a single prior user message is allowed; any assistant,
+    tool, or tool-call entries disqualify the turn, as does more than one
+    prior message.
     """
     if not _cache_enabled(cfg):
         return False
@@ -134,4 +141,15 @@ def is_cache_eligible(
         return False
     if _UNSAFE_PROMPT_RE.search(prompt):
         return False
+    if history:
+        if len(history) > _MAX_HISTORY_MESSAGES:
+            return False
+        for msg in history:
+            if not isinstance(msg, dict):
+                return False
+            role = msg.get("role")
+            if role != "user":
+                return False
+            if msg.get("tool_calls") or msg.get("tool_call_id"):
+                return False
     return True
