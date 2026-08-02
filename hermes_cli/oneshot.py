@@ -242,7 +242,7 @@ def run_oneshot(
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
             try:
-                response, result = _run_agent(
+                response, result = _run_agent_maybe_cached(
                     prompt,
                     model=model,
                     provider=provider,
@@ -467,6 +467,73 @@ def _run_agent(
                 session_db.close()
             except Exception:
                 logging.debug("oneshot session store cleanup failed", exc_info=True)
+
+
+def _run_agent_maybe_cached(
+    prompt: str,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    toolsets: object = None,
+    use_config_toolsets: bool = True,
+) -> tuple[str, dict]:
+    """Same contract as ``_run_agent``, transparently backed by the semantic
+    response cache when the turn is eligible (see ``agent.semantic_response_cache``).
+
+    Disabled by default; a disqualified or cache-disabled turn falls straight
+    through to ``_run_agent`` with no behavior change. Any cache-layer error
+    also falls straight through — a broken cache must never block a real
+    response.
+    """
+    from agent.semantic_response_cache import get_cache, get_cache_ttl, is_cache_eligible
+    from hermes_cli.config import load_config
+    from hermes_cli.tools_config import _get_platform_tools
+
+    def _call_real_agent() -> tuple[str, dict]:
+        return _run_agent(
+            prompt,
+            model=model,
+            provider=provider,
+            toolsets=toolsets,
+            use_config_toolsets=use_config_toolsets,
+        )
+
+    try:
+        cfg = load_config()
+        toolsets_list = _normalize_toolsets(toolsets)
+        if toolsets_list is None and use_config_toolsets:
+            toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
+        if not is_cache_eligible(prompt, toolsets_list, cfg):
+            return _call_real_agent()
+    except Exception:
+        return _call_real_agent()
+
+    real_result_box: dict = {}
+
+    def _provider_call(actual_prompt: str) -> str:
+        response, result = _call_real_agent()
+        real_result_box["result"] = result
+        return response
+
+    try:
+        cache = get_cache()
+        response = cache.get_or_call(prompt, _provider_call, ttl=get_cache_ttl(cfg))
+    except Exception:
+        # Ollama/SQLite/ClawMem unavailable or misbehaving — fail open.
+        return _call_real_agent()
+
+    if "result" in real_result_box:
+        return response, real_result_box["result"]
+
+    # Cache hit: no provider call happened, so synthesize a minimal result
+    # dict compatible with _write_usage_file()'s expectations.
+    return response, {
+        "completed": True,
+        "failed": False,
+        "partial": False,
+        "cache_hit": True,
+        "api_calls": 0,
+        "estimated_cost_usd": 0.0,
+    }
 
 
 def _oneshot_clarify_callback(question: str, choices=None, multi_select=False) -> str:

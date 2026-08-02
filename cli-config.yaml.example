@@ -547,6 +547,25 @@ prompt_caching:
   cache_ttl: "5m" # use "1h" for long sessions with pauses between turns
 
 # =============================================================================
+# Semantic Response Cache (ClawMem, experimental)
+# =============================================================================
+# Short-circuits `hermes -z` (oneshot) provider calls for safe, repetitive,
+# tool-free Q&A prompts (e.g. "what is the default model?") using the
+# ClawMem-backed semantic cache POC: local Ollama embeddings
+# (qwen3-embedding:0.6b) + ~/.hermes/state.db, cosine similarity >= 0.94.
+# Mirrors entries to ~/.clawmem/semantic-prompt-cache/ for cross-agent reuse.
+#
+# Eligibility is intentionally narrow: only turns with zero toolsets enabled
+# and prompt text that doesn't look like code generation, shell/file
+# operations, or a tool call are ever cached. Any cache-layer error (Ollama
+# down, SQLite locked, etc.) fails open — the real provider is always called.
+#
+# The HERMES_SEMANTIC_CACHE_ENABLED env var overrides this setting when set.
+# semantic_cache:
+#   enabled: false
+#   ttl_seconds: 3600 # how long a cached response stays eligible for reuse
+
+# =============================================================================
 # Auxiliary Models (Advanced — Experimental)
 # =============================================================================
 # Hermes uses lightweight "auxiliary" models for side tasks: image analysis,
