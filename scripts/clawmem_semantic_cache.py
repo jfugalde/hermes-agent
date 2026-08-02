@@ -227,6 +227,18 @@ class SemanticCache:
         except Exception:
             return None
 
+    def store(
+        self,
+        prompt: str,
+        response: str,
+        ttl: int = DEFAULT_TTL,
+    ) -> None:
+        """Store a response for a prompt, normalizing and embedding the prompt."""
+        normalized = normalize_prompt(prompt)
+        prompt_hash = hashlib.sha256(normalized.encode()).hexdigest()[:32]
+        embedding = ollama_embed(normalized)
+        self._store(prompt_hash, normalized, response, embedding, ttl)
+
     def get_or_call(
         self,
         prompt: str,
