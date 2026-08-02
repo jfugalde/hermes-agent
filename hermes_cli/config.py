@@ -1592,6 +1592,16 @@ DEFAULT_CONFIG = {
         "cache_ttl": "5m",
     },
 
+    # Semantic response cache (ClawMem, experimental). Short-circuits `hermes -z`
+    # (oneshot) provider calls for safe, repetitive, tool-free Q&A prompts via
+    # local Ollama embeddings + ~/.hermes/state.db (cosine similarity >= 0.94).
+    # Off by default; overridden by the HERMES_SEMANTIC_CACHE_ENABLED env var
+    # when set. See agent/semantic_response_cache.py.
+    "semantic_cache": {
+        "enabled": False,
+        "ttl_seconds": 3600,
+    },
+
     # OpenRouter-specific settings.
     # response_cache: enable OpenRouter response caching (X-OpenRouter-Cache header).
     #   When enabled, identical requests return cached responses for free (zero billing).
