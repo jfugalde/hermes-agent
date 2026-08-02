@@ -3214,6 +3214,69 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
     return True
 
 
+def _semantic_cache_lookup_sync(
+    message: str,
+    toolsets: Optional[List[str]],
+    cfg: dict,
+) -> Optional[str]:
+    """Blocking cache-eligibility check + lookup. Run off the event loop.
+
+    Reuses the same eligibility gate and ``SemanticCache`` used by the
+    ``hermes -z`` oneshot path (``agent/semantic_response_cache.py``) so the
+    gateway and the CLI share one definition of "safe to cache" and one
+    feature flag (``HERMES_SEMANTIC_CACHE_ENABLED`` / ``semantic_cache.enabled``).
+    Returns ``None`` on disabled/ineligible/miss/any error — callers must
+    treat ``None`` as "run the real agent", never as an error to surface.
+    """
+    from agent.semantic_response_cache import get_cache, is_cache_eligible, is_cache_enabled
+
+    if not is_cache_enabled(cfg):
+        return None
+    if not is_cache_eligible(message, toolsets, cfg):
+        return None
+    return get_cache().get(message)
+
+
+async def _maybe_get_cached_agent_result(
+    message: str,
+    toolsets: Optional[List[str]],
+    cfg: dict,
+) -> Optional[Dict[str, Any]]:
+    """Best-effort semantic-cache short-circuit for a plain-chat turn.
+
+    Returns a minimal ``agent_result``-shaped dict (see ``_run_agent_inner``'s
+    documented return contract) when — and only when — the semantic cache is
+    enabled, the turn is eligible (no toolsets, short/non-code/non-tool
+    prompt; see ``agent.semantic_response_cache.is_cache_eligible``), and a
+    sufficiently similar prompt (cosine similarity above
+    ``clawmem_semantic_cache.SIMILARITY_THRESHOLD``) is already cached.
+
+    Returns ``None`` in every other case — disabled (the default), ineligible
+    prompt, cache miss, or any exception talking to Ollama/SQLite/ClawMem —
+    so the caller falls straight through to the normal ``_run_agent()`` call
+    with zero behavior change. The lookup itself runs in a worker thread via
+    ``asyncio.to_thread`` because it can make a blocking HTTP call to the local
+    Ollama embedding endpoint; running it inline on the event loop would stall
+    every other session on this gateway process for the duration of that call.
+    """
+    try:
+        cached_response = await asyncio.to_thread(
+            _semantic_cache_lookup_sync, message, toolsets, cfg
+        )
+    except Exception as exc:
+        logger.debug("Semantic cache lookup failed (non-fatal): %s", exc)
+        return None
+    if not cached_response:
+        return None
+    return {
+        "final_response": cached_response,
+        "completed": True,
+        "failed": False,
+        "api_calls": 0,
+        "cache_hit": True,
+    }
+
+
 def _preserve_queued_followup_history_offset(
     current_result: dict,
     followup_result: dict,
@@ -14151,20 +14214,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # below; a /new or another lifecycle transition may move
             # session_entry.session_id while the old run is still unwinding.
             _run_start_session_id = session_entry.session_id
-            agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=_run_start_session_id,
-                session_key=session_key,
-                run_generation=run_generation,
-                event_message_id=self._reply_anchor_for_event(event),
-                channel_prompt=event.channel_prompt,
-                moa_config=getattr(event, "_moa_config", None),
-                persist_user_message=persist_user_message,
-                persist_user_timestamp=persist_user_timestamp,
-            )
+
+            # Semantic-cache short-circuit for low-stakes, repetitive Q&A
+            # (see agent/semantic_response_cache.py). Off by default; when
+            # disabled, ineligible, a miss, or on any error this is a no-op
+            # and falls straight through to the normal _run_agent() call
+            # below with zero behavior change. Never applies to turns with
+            # any toolset enabled, so it cannot short-circuit tool calls,
+            # code generation, or state-changing commands.
+            agent_result = None
+            try:
+                from hermes_cli.tools_config import _get_platform_tools
+
+                _cache_cfg = _load_gateway_config()
+                _cache_toolsets = sorted(
+                    _get_platform_tools(_cache_cfg, _platform_config_key(source.platform))
+                )
+                agent_result = await _maybe_get_cached_agent_result(
+                    message_text, _cache_toolsets, _cache_cfg
+                )
+            except Exception as _cache_gate_err:
+                logger.debug(
+                    "Semantic cache eligibility check failed (non-fatal): %s",
+                    _cache_gate_err,
+                )
+                agent_result = None
+
+            if agent_result is None:
+                agent_result = await self._run_agent(
+                    message=message_text,
+                    context_prompt=context_prompt,
+                    history=history,
+                    source=source,
+                    session_id=_run_start_session_id,
+                    session_key=session_key,
+                    run_generation=run_generation,
+                    event_message_id=self._reply_anchor_for_event(event),
+                    channel_prompt=event.channel_prompt,
+                    moa_config=getattr(event, "_moa_config", None),
+                    persist_user_message=persist_user_message,
+                    persist_user_timestamp=persist_user_timestamp,
+                )
 
             # Stop persistent typing indicator now that the agent is done.
             # Slack AI status is scoped to a thread/workspace, so preserve the
@@ -14204,6 +14294,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
 
             response = agent_result.get("final_response") or ""
+
+            # Store eligible responses in the semantic cache for future reuse.
+            try:
+                if (
+                    not _cache_toolsets
+                    and response
+                    and not agent_result.get("cache_hit")
+                ):
+                    from agent.semantic_response_cache import (
+                        get_cache,
+                        get_cache_ttl,
+                        is_cache_eligible,
+                    )
+
+                    if is_cache_eligible(message_text, _cache_toolsets, _cache_cfg):
+                        get_cache().store(
+                            message_text, response, get_cache_ttl(_cache_cfg)
+                        )
+            except Exception as _cache_store_err:
+                logger.debug(
+                    "Semantic cache store failed (non-fatal): %s", _cache_store_err
+                )
+
             # Hidden-reasoning-only retry exhaustion: the loop's sentinel text
             # ("Codex response remained incomplete after 3 continuation
             # attempts") doubles as final_response, so it would be delivered

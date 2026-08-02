@@ -1,10 +1,13 @@
-"""Semantic response cache integration for Hermes's oneshot (``hermes -z``) path.
+"""Semantic response cache integration shared by Hermes's oneshot
+(``hermes -z``) path and the live gateway's plain-chat message handler.
 
 Wraps the ClawMem-backed POC (``~/.hermes/scripts/clawmem_semantic_cache.py``)
 behind a narrow eligibility gate so caching only ever applies to short,
 tool-free, deterministic Q&A prompts. Everything else — tool calls, code
-generation, and any turn running inside the normal interactive/gateway
-agent loop — is left completely untouched.
+generation, and any turn with tool access — is left completely untouched.
+Both callers (``hermes_cli/oneshot.py`` and ``gateway/run.py``) share this one
+eligibility gate, one feature flag, and one ``SemanticCache`` instance so the
+"is this prompt safe to cache?" definition never drifts between the two.
 
 Safety model:
     - Off by default. Must be explicitly enabled via the
@@ -85,6 +88,16 @@ def _cache_enabled(cfg: Optional[dict]) -> bool:
         if isinstance(semantic_cfg, dict):
             return bool(semantic_cfg.get("enabled", False))
     return False
+
+
+def is_cache_enabled(cfg: Optional[dict]) -> bool:
+    """Public wrapper around the feature-flag check.
+
+    Exposed so callers (e.g. ``gateway/run.py``) can cheaply bail out before
+    doing any per-turn work (resolving toolsets, etc.) when the cache is off
+    — which is the default, and therefore the hot path for every message.
+    """
+    return _cache_enabled(cfg)
 
 
 def get_cache_ttl(cfg: Optional[dict]) -> int:
