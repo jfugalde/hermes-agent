@@ -1,0 +1,7 @@
+name: semantic-cache
+description: |
+  Semantic response cache command hook. When the user runs /cacheask <question>,
+  it looks up the local Ollama + SQLite semantic cache and returns a cached
+  response for low-stakes, repetitive Q&A without invoking the agent.
+events:
+  - command:cacheask
