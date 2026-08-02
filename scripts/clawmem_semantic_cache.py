@@ -211,6 +211,34 @@ class SemanticCache:
         except Exception:
             pass
 
+    def get(self, prompt: str) -> Optional[str]:
+        """Return a cached response for a semantically similar prompt, or None.
+
+        Read-only lookup: it does not call an LLM or store anything on miss.
+        Useful for gateway hooks that only want to query the cache without
+        side effects. Errors (e.g. Ollama unreachable) return None so the
+        caller can fall back to normal processing.
+        """
+        try:
+            normalized = normalize_prompt(prompt)
+            embedding = ollama_embed(normalized)
+            hit = self._search(normalized, embedding)
+            return hit["response_text"] if hit else None
+        except Exception:
+            return None
+
+    def store(
+        self,
+        prompt: str,
+        response: str,
+        ttl: int = DEFAULT_TTL,
+    ) -> None:
+        """Store a response for a prompt, normalizing and embedding the prompt."""
+        normalized = normalize_prompt(prompt)
+        prompt_hash = hashlib.sha256(normalized.encode()).hexdigest()[:32]
+        embedding = ollama_embed(normalized)
+        self._store(prompt_hash, normalized, response, embedding, ttl)
+
     def get_or_call(
         self,
         prompt: str,
