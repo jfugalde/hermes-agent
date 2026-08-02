@@ -3237,6 +3237,28 @@ def _semantic_cache_lookup_sync(
     return get_cache().get(message)
 
 
+def _semantic_cache_store_sync(
+    message: str,
+    response: str,
+    toolsets: Optional[List[str]],
+    cfg: dict,
+) -> None:
+    """Blocking cache-eligibility check + write. Run off the event loop.
+
+    Populates the semantic cache from a real, freshly-generated gateway
+    response so a later semantically-similar low-stakes question can be
+    served by ``_maybe_get_cached_agent_result`` without a provider call.
+    Uses the exact same eligibility gate as the lookup path, so a response
+    is only ever stored for turns that could also have been served from
+    cache (no toolsets, short/non-code/non-tool prompt, feature enabled).
+    """
+    from agent.semantic_response_cache import get_cache, get_cache_ttl, is_cache_eligible
+
+    if not is_cache_eligible(message, toolsets, cfg):
+        return
+    get_cache().store(message, response, get_cache_ttl(cfg))
+
+
 async def _maybe_get_cached_agent_result(
     message: str,
     toolsets: Optional[List[str]],
@@ -14295,23 +14317,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             response = agent_result.get("final_response") or ""
 
-            # Store eligible responses in the semantic cache for future reuse.
+            # Store eligible, freshly-generated responses in the semantic
+            # cache so a later semantically-similar question can be served
+            # from _maybe_get_cached_agent_result() above without a provider
+            # call. Skipped entirely for cache hits (nothing new to store)
+            # and for any turn the eligibility gate rejects (toolsets, long
+            # or code/tool-shaped prompts, or the feature simply being off —
+            # the default). Runs off the event loop for the same reason the
+            # lookup does: SemanticCache.store() makes a blocking Ollama
+            # embedding call.
             try:
-                if (
-                    not _cache_toolsets
-                    and response
-                    and not agent_result.get("cache_hit")
-                ):
-                    from agent.semantic_response_cache import (
-                        get_cache,
-                        get_cache_ttl,
-                        is_cache_eligible,
+                if response and not agent_result.get("cache_hit"):
+                    await asyncio.to_thread(
+                        _semantic_cache_store_sync,
+                        message_text,
+                        response,
+                        locals().get("_cache_toolsets"),
+                        locals().get("_cache_cfg") or {},
                     )
-
-                    if is_cache_eligible(message_text, _cache_toolsets, _cache_cfg):
-                        get_cache().store(
-                            message_text, response, get_cache_ttl(_cache_cfg)
-                        )
             except Exception as _cache_store_err:
                 logger.debug(
                     "Semantic cache store failed (non-fatal): %s", _cache_store_err
