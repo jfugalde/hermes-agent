@@ -139,3 +139,77 @@ design sketch rather than a code change in this POC.
 2. Should we add a TTL-aware cache warmup script for known FAQs?
 3. Should the auto-short-circuit design reuse `_run_agent`'s persistence path or
    write a minimal transcript row directly in the hook handler?
+
+## Update: Automatic gateway short-circuit implemented
+
+The live-gateway integration is now implemented in the `hermes-agent` checkout
+on branch `feat/semantic-response-cache`. It shares the same eligibility gate,
+feature flag, and `SemanticCache` instance as the existing `hermes -z` oneshot
+path so the two callers never drift.
+
+- `agent/semantic_response_cache.py` — shared gate. Exposes
+  `is_cache_enabled(cfg)`, `is_cache_eligible(prompt, toolsets, cfg)`,
+  `get_cache()`, and `get_cache_ttl(cfg)`. Off by default; enabled via
+  `HERMES_SEMANTIC_CACHE_ENABLED` or `semantic_cache.enabled`. Eligible only
+  when zero toolsets are enabled and the prompt is short and doesn't look like
+  code/shell/file/tool-call intent.
+- `gateway/run.py` — `_maybe_get_cached_agent_result()` wraps the plain-chat
+  `self._run_agent()` call in `_handle_message_with_agent`. The lookup runs off
+  the event loop via `asyncio.to_thread()` so the Ollama embedding call does
+  not stall the gateway. On a hit it returns a minimal `agent_result` dict
+  (`final_response`, `completed`, `failed`, `api_calls=0`, `cache_hit=True`);
+  on a miss or error it returns `None` and the normal provider path runs.
+- `gateway/run.py` — `_semantic_cache_store_sync()` writes freshly-generated,
+  eligible responses back to the cache after a real turn, so later similar
+  questions can be served without a provider call.
+
+### Why this is safe
+
+- Tool-enabled turns are never cached or served from cache: the gate receives
+  the fully resolved toolset list for the turn and rejects any non-empty list.
+- Slash commands are dispatched before this path, so `/cacheask` and other
+  commands are unaffected.
+- The conservative regex denylist rejects code generation, shell/file
+  operations, and tool-call-shaped prompts even for tool-free turns.
+- Any cache-layer error fails open: the real provider is always called.
+
+### TTL
+
+`semantic_cache.ttl_seconds` is configurable; the default is now 300 seconds
+(5 minutes) for chat responses.
+
+### How to verify
+
+1. Unit tests (no live services):
+
+   ```bash
+   cd ~/.hermes/hermes-agent
+   .venv/bin/python -m pytest tests/gateway/test_semantic_cache_gateway_shortcircuit.py tests/hermes_cli/test_oneshot_semantic_cache.py -v
+   ```
+
+2. Offline cache-hit demo in this worktree:
+
+   ```bash
+   cd ~/.hermes/.worktrees/semantic-cache-gateway
+   python3 scripts/test_semantic_cache_hit.py --demo
+   ```
+
+3. Live end-to-end (requires local Ollama with `qwen3-embedding:0.6b`):
+
+   ```bash
+   export HERMES_SEMANTIC_CACHE_ENABLED=1
+   # restart the gateway
+   ```
+
+   Send the same short, tool-free question twice from a connected platform.
+   The second turn should be a near-instant cache hit with `api_calls=0`.
+
+### Remaining limitations
+
+- The cache ignores conversation history; a tool-free turn can hit cache even
+  with rich context. This matches the existing oneshot behavior and is an
+  accepted trade-off for low-stakes Q&A.
+- On a `gateway.multiplex_profiles`-enabled gateway, the cache check uses the
+  process `Path.home()`, not the resolved profile home for the message source.
+  This is a pre-existing limitation of the shared cache module, not introduced
+  by this change.
