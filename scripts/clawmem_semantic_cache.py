@@ -200,7 +200,7 @@ class SemanticCache:
             "response_b64": base64.b64encode(response.encode()).decode(),
         }
         lines = ["---", json.dumps(frontmatter, indent=2), "---", "", normalized]
-        path.write_text("\n".join(lines))
+        path.write_text("\n".join(lines), encoding="utf-8")
         # Background update so ClawMem picks up the new file without blocking.
         try:
             subprocess.Popen(
