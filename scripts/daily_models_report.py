@@ -1129,7 +1129,8 @@ def write_report_files(full_md: str, stamp: str) -> tuple[Path, Path]:
 
 SPEND_OLLAMA_LIKE = "%ollama.com%"
 SPEND_COPILOT_LIKE = "%githubcopilot.com%"
-SPEND_CURSOR_LIKE = "cursor://%"
+SPEND_CURSOR_NATIVE = "cursor://%"   # old native cursor://agent
+SPEND_CURSOR_GO = "%127.0.0.1:9101%"  # cursor-go-adapter
 
 
 def _pct(xs: list[float], p: float) -> float:
@@ -1212,7 +1213,17 @@ def analyze_spend(window_days: int = 1) -> dict:
 
         ollama_usage = _query_usage(SPEND_OLLAMA_LIKE)
         copilot_usage = _query_usage(SPEND_COPILOT_LIKE)
-        cursor_usage = _query_usage(SPEND_CURSOR_LIKE)
+        # Merge cursor://agent (native) + cursor-go-adapter (:9101) into one dict
+        cursor_native = _query_usage(SPEND_CURSOR_NATIVE)
+        cursor_go     = _query_usage(SPEND_CURSOR_GO)
+        cursor_usage: dict[str, dict] = {}
+        for src in (cursor_native, cursor_go):
+            for model, u in src.items():
+                if model in cursor_usage:
+                    for k in ("calls", "intok", "outtok", "sess", "sub_calls"):
+                        cursor_usage[model][k] += u[k]
+                else:
+                    cursor_usage[model] = dict(u)
 
         all_usage = {**ollama_usage}  # start with Ollama (has latency data)
 
@@ -1229,11 +1240,30 @@ def analyze_spend(window_days: int = 1) -> dict:
             in_r, out_r = (rate if rate else (_sonnet_in, _sonnet_out))
             return (intok / 1_000_000 * in_r) + (outtok / 1_000_000 * out_r)
 
-        # Cursor: flat $200/mo plan — cost per call is $200 / projected_calls
-        # Use $0 for flat-plan models (already paid); show cost for FALLBACK key usage
-        # For now we track volume, not USD (flat billing, USD = fixed)
+        # Cursor: FLAT plan ($200/mo) covers standard models for the primary Business key.
+        # FALLBACK key is pay-as-you-go — charge OR rates.
+        # We can't distinguish per-call which key was used, so charge the full OR rate
+        # (conservative — if all traffic is FALLBACK, cost = OR rates; if all flat, $0).
         def _cursor_usd(model: str, intok: int, outtok: int) -> float:
-            return 0.0  # flat plan — no per-token cost on standard models
+            # Use same OR_STATIC lookup as copilot
+            import re
+            norm = re.sub(r'(?<=\d)-(\d+)$', r'.\1', model)
+            # OR_STATIC rates (subset most common cursor models)
+            OR_RATES: dict[str, tuple[float, float]] = {
+                "gpt-5.4-nano": (0.20, 1.25),
+                "gpt-5-mini": (0.25, 2.00),
+                "gpt-5.4-mini": (0.75, 4.50),
+                "kimi-k2.7-code": (0.73, 3.50),
+                "gemini-3.6-flash": (1.50, 7.50),
+                "gpt-5.3-codex-low": (1.75, 14.00),
+                "gpt-5.3-codex": (1.75, 14.00),
+                "claude-sonnet-4.6": (3.00, 15.00),
+                "deepseek-v4-flash": (0.14, 0.28),
+            }
+            rate = OR_RATES.get(norm) or OR_RATES.get(model)
+            if not rate:
+                rate = (1.75, 14.00)  # fallback: codex-level estimate
+            return (intok / 1_000_000 * rate[0]) + (outtok / 1_000_000 * rate[1])
 
         # Build combined rows with provider tag + cost
         all_rows_raw: list[dict] = []
