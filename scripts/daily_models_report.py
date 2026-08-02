@@ -35,6 +35,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+from response_cache import ttl_cached
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 COPILOT_MODELS_URL = "https://api.githubcopilot.com/models"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
@@ -131,6 +133,7 @@ def get_copilot_headers(token: str) -> dict:
     }
 
 
+@ttl_cached(ttl_seconds=1800)
 def fetch_copilot_models(token: str) -> list[dict]:
     try:
         data = http_json(COPILOT_MODELS_URL, headers=get_copilot_headers(token), timeout=15)
@@ -175,6 +178,7 @@ def fetch_copilot_models(token: str) -> list[dict]:
     return models
 
 
+@ttl_cached(ttl_seconds=3600)
 def fetch_openrouter_pricing() -> dict[str, dict]:
     try:
         data = http_json(OPENROUTER_MODELS_URL, timeout=15)
@@ -195,6 +199,7 @@ def fetch_openrouter_pricing() -> dict[str, dict]:
     return result
 
 
+@ttl_cached(ttl_seconds=900)
 def fetch_ollama_cloud_ids(api_key: str) -> list[str]:
     try:
         data = http_json(
@@ -219,6 +224,7 @@ def fetch_ollama_cloud_ids(api_key: str) -> list[str]:
     return ids
 
 
+@ttl_cached(ttl_seconds=3600)
 def ollama_show(api_key: str, model_id: str) -> dict | None:
     try:
         return http_json(
@@ -250,6 +256,7 @@ def library_path_candidates(model_id: str) -> list[str]:
     return uniq
 
 
+@ttl_cached(ttl_seconds=86400)
 def fetch_usage_level(model_id: str) -> int | None:
     for path in library_path_candidates(model_id):
         try:
