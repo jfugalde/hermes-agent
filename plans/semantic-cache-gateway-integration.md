@@ -139,3 +139,31 @@ design sketch rather than a code change in this POC.
 2. Should we add a TTL-aware cache warmup script for known FAQs?
 3. Should the auto-short-circuit design reuse `_run_agent`'s persistence path or
    write a minimal transcript row directly in the hook handler?
+
+## Repo Scope Note (why there's no `gateway/run.py` edit here)
+
+This worktree's repository root is `~/.hermes` itself (a git repo tracking
+this home directory's `scripts/`, `hooks/`, and `plans/`, per its
+`.gitignore`) — **not** the Hermes gateway source checkout. `git ls-tree -r
+HEAD` here contains no `gateway/`, `agent/`, or `hermes_cli/` paths, so there
+is no `_run_agent` call site or command-hook registry to edit from this
+worktree; the line-number references above describe the separate source
+checkout at `~/.hermes/hermes-agent` (a different git repository, not a
+worktree of this one).
+
+That separate checkout already has a real, non-hook integration on branch
+`feat/semantic-response-cache` (commits `0a0a408d1`, `18fa459bd`):
+`agent/semantic_response_cache.py` gates eligibility on an explicit
+`HERMES_SEMANTIC_CACHE_ENABLED` flag / `semantic_cache.enabled` config key,
+zero active toolsets, prompt length, and a regex denylist for code/tool/shell
+intent, then wires `SemanticCache` into `hermes_cli/oneshot.py`'s one-shot
+(`hermes -z`) path, with a test in
+`tests/hermes_cli/test_oneshot_semantic_cache.py`. That work lives outside
+this worktree and was left untouched here.
+
+The verification script added in this worktree
+(`scripts/test_semantic_cache_hit.py`) exercises the shared
+`SemanticCache`/`clawmem_semantic_cache.py` primitive directly (offline, with
+a fake embedding function) so the cache-hit behavior can be demonstrated and
+regression-tested from this worktree without depending on either gateway
+checkout.
