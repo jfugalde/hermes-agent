@@ -1,0 +1,8 @@
+name: semantic-cache-auto-populate
+description: |
+  Listens on agent:end and caches the final assistant response when safe.
+  Uses the semantic_cache_safety classifier to avoid caching code, errors,
+  or multi-step agentic responses. Fail-open: exceptions return ignored.
+events:
+  - agent:end
+version: 1.0.0
