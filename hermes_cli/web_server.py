@@ -17368,6 +17368,61 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
     if not _is_accepted_host(parsed.netloc, bound_host):
+        # Reverse-proxy deployments can terminate TLS/public host upstream and
+        # forward WS handshakes to an internal bind address (e.g. Docker
+        # bridge IP). Allow the externally-visible dashboard host as an
+        # additional same-origin target when it comes from explicit dashboard
+        # config or trusted proxy host headers.
+        allowed_public_hosts: set[str] = set()
+        try:
+            from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+            public_url = resolve_public_url()
+            public_host = urllib.parse.urlparse(public_url).hostname or ""
+            if public_host:
+                allowed_public_hosts.add(public_host.lower())
+        except Exception:
+            pass
+
+        def _extract_forwarded_host(value: str) -> str:
+            v = (value or "").strip()
+            if not v:
+                return ""
+            if v.startswith("["):
+                close = v.find("]")
+                host_only = v[1:close] if close != -1 else v.strip("[]")
+            else:
+                host_only = v.rsplit(":", 1)[0] if ":" in v else v
+            return host_only.strip().lower()
+
+        forwarded_host = (ws.headers.get("x-forwarded-host", "") or "").strip()
+        if forwarded_host:
+            forwarded_first = forwarded_host.split(",", 1)[0].strip()
+            host_only = _extract_forwarded_host(forwarded_first)
+            if host_only:
+                allowed_public_hosts.add(host_only)
+
+        original_host = (ws.headers.get("x-original-host", "") or "").strip()
+        if original_host:
+            host_only = _extract_forwarded_host(original_host.split(",", 1)[0].strip())
+            if host_only:
+                allowed_public_hosts.add(host_only)
+
+        forwarded = (ws.headers.get("forwarded", "") or "").strip()
+        if forwarded:
+            # RFC 7239: Forwarded: for=...;host=example.com;proto=https
+            for forwarded_item in forwarded.split(","):
+                for token in forwarded_item.split(";"):
+                    k, sep, v = token.partition("=")
+                    if sep and k.strip().lower() == "host":
+                        host_only = _extract_forwarded_host(v.strip().strip('"'))
+                        if host_only:
+                            allowed_public_hosts.add(host_only)
+                        break
+
+        for candidate_host in allowed_public_hosts:
+            if _is_accepted_host(parsed.netloc, candidate_host):
+                return None
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 
