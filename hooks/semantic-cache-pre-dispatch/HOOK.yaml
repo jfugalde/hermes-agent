@@ -1,0 +1,6 @@
+name: semantic-cache-pre-dispatch
+description: Check semantic cache before LLM call to short-circuit on cache hit
+events:
+  - agent:start
+priority: 90
+version: 1.0.0
