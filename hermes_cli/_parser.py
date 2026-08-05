@@ -154,6 +154,12 @@ def build_top_level_parser():
         help="Comma-separated toolsets to enable for this invocation. Applies to -z/--oneshot and --tui.",
     )
     parser.add_argument(
+        "--no-a2a",
+        action="store_true",
+        default=False,
+        help="Disable A2A automatic profile routing for this invocation",
+    )
+    parser.add_argument(
         "--resume",
         "-r",
         metavar="SESSION",

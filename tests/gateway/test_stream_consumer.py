@@ -176,6 +176,48 @@ class TestFinalizeCapabilityGate:
         picky.edit_message.assert_called_once()
         assert picky.edit_message.call_args[1]["finalize"] is True
 
+    @pytest.mark.asyncio
+    async def test_telegram_full_stream_finalize_no_change(self):
+        """End-to-end: Telegram stream where final text matches last preview.
+
+        Simulates the full streaming lifecycle (on_delta → run → finish)
+        with an adapter that has REQUIRES_EDIT_FINALIZE=True.  The final
+        accumulated text is identical to the last preview edit, so the
+        short-circuit at _send_or_edit would skip the finalize=True edit
+        without the REQUIRES_EDIT_FINALIZE exception.  Verifies that at
+        least one edit_message call carries finalize=True.
+        """
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="m1",
+        ))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="m1",
+        ))
+
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("Hello **World**")
+
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.15)
+
+        consumer.finish()
+        await task
+
+        final_calls = [
+            call for call in adapter.edit_message.call_args_list
+            if call.kwargs.get("finalize") is True
+        ]
+        assert len(final_calls) > 0, (
+            "Finalize edit was skipped despite REQUIRES_EDIT_FINALIZE=True. "
+            "The short-circuit at _send_or_edit must not skip finalize=True "
+            "edits for adapters that require an explicit finalize signal."
+        )
+
 
 class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.

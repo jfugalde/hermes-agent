@@ -2439,7 +2439,7 @@ DEFAULT_CONFIG = {
                                      # (API, tools, iteration budget), never a delegation
                                      # stopwatch. Set a positive number of seconds
                                      # (floor 30s) to enforce a hard cap.
-        "reasoning_effort": "",  # subagent effort: "ultra", "max", "xhigh", "high",
+        "reasoning_effort": "low",  # subagent effort: "ultra", "max", "xhigh", "high",
                                  # "medium", "low", "minimal", "none" (empty = inherit)
         "max_concurrent_children": 3,  # unified concurrency cap: max parallel children per batch
                                        # AND max concurrent background (background=true)
@@ -2460,6 +2460,34 @@ DEFAULT_CONFIG = {
         # Flip to true only if you trust delegated work to run dangerous cmds
         # without human review (cron pipelines, batch automation, etc.).
         "subagent_auto_approve": False,
+    },
+
+    # A2A (Agent-to-Agent) routing — LangChain/heuristic profile selection before
+    # execution. Disabled by default so existing manual profile selection is unchanged.
+    "a2a": {
+        "enabled": False,
+        "routing": {
+            "provider": "",
+            "model": "",
+            "temperature": 0,
+            "timeout_ms": 3000,
+            "fallback": "heuristic",
+        },
+        "profiles": {},
+        "kanban": {
+            "enabled": True,
+            "bridge_url": "http://127.0.0.1:3046",
+            "route_keywords": [],
+        },
+        "heuristics": [],
+        "explicit_hints": {
+            "enabled": True,
+        },
+        "logging": {
+            "enabled": True,
+            "log_decisions": True,
+            "include_confidence": True,
+        },
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
@@ -6021,7 +6049,33 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 f"Move '{key}' under the appropriate section",
             ))
 
+    _validate_a2a_section(config, issues)
+
     return issues
+
+
+def _validate_a2a_section(config: Dict[str, Any], issues: List["ConfigIssue"]) -> None:
+    """Validate the optional ``a2a:`` routing section."""
+    raw = config.get("a2a")
+    if raw is None:
+        return
+    try:
+        from hermes_cli.a2a_config import validate_a2a_config
+    except ImportError:
+        return
+
+    for problem in validate_a2a_config(raw, config):
+        severity = "error" if (
+            "must be" in problem
+            or "is required" in problem
+            or "not configured in providers" in problem
+            or "not a valid regex" in problem
+        ) else "warning"
+        issues.append(ConfigIssue(
+            severity,
+            problem,
+            "See docs/superpowers/specs/2026-08-05-hermes-a2a-routing-design.md",
+        ))
 
 
 def print_config_warnings(config: Optional[Dict[str, Any]] = None) -> None:

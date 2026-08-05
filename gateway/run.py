@@ -12962,6 +12962,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return message_text
 
+    def _profile_scope_for_source(self, source: SessionSource) -> bool:
+        """Return True when inbound handling must run under a profile home scope.
+
+        Multiplexed gateways always scope per source. Single-profile gateways
+        also scope when A2A routing stamps ``source.profile`` to a profile other
+        than this process's active gateway profile (athena-gateway, apollo-gateway, …).
+        """
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return True
+        routed = (getattr(source, "profile", None) or "").strip()
+        if not routed:
+            return False
+        try:
+            return routed != self._active_profile_name()
+        except Exception:
+            return True
+
     async def _prepare_profile_scoped_inbound_message_text(
         self,
         *,
@@ -12970,8 +12987,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         history: List[Dict[str, Any]],
         session_key: Optional[str] = None,
     ) -> Optional[str]:
-        """Run inbound preprocessing under the routed profile when multiplexed."""
-        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+        """Run inbound preprocessing under the routed profile when scoped."""
+        if self._profile_scope_for_source(source):
             with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                 return await self._prepare_inbound_message_text(
                     event=event,
@@ -14124,6 +14141,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if turn_sidecar_notes and session_key:
             self._set_pending_turn_sidecar_notes(session_key, turn_sidecar_notes)
 
+        _a2a_profile_before = (getattr(source, "profile", None) or "").strip() or self._active_profile_name()
+        message_text, source, a2a_kanban_reply = await self._apply_a2a_gateway_routing(
+            message_text,
+            source,
+        )
+        if a2a_kanban_reply is not None:
+            return a2a_kanban_reply
+        _a2a_profile_after = (getattr(source, "profile", None) or "").strip() or _a2a_profile_before
+        if _a2a_profile_after != _a2a_profile_before:
+            try:
+                event.source = source
+            except Exception:
+                pass
+            context = build_session_context(source, self.config, session_entry)
+            context_prompt = self._pinned_session_context_prompt(
+                context, _redact_pii, session_key
+            )
+
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
@@ -14902,7 +14937,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         inside this method, so contextvars behave correctly in the worker
         thread.
         """
-        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+        if self._profile_scope_for_source(source):
             with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                 return self._format_session_info()
         return self._format_session_info()
@@ -20230,14 +20265,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
-        When multiplexing is active, resolve the inbound source's profile and
-        run the whole turn inside ``_profile_runtime_scope`` so config/skills/
-        memory resolve to that profile's home AND credentials resolve from that
-        profile's secret scope (never the process-global ``os.environ``). When
-        multiplexing is off this is a transparent pass-through — zero behavior
-        change for single-profile gateways.
+        When multiplexing is active, or when A2A routing stamps ``source.profile``
+        to a profile other than this gateway process's active profile, resolve the
+        inbound source's profile and run the whole turn inside
+        ``_profile_runtime_scope`` so config/skills/memory and credentials resolve
+        from that profile's home. Otherwise this is a transparent pass-through.
         """
-        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
+        if not self._profile_scope_for_source(source):
             return await self._run_agent_inner(
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
@@ -20257,6 +20291,78 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
             )
+
+    async def _apply_a2a_gateway_routing(
+        self,
+        message_text: str,
+        source: SessionSource,
+    ) -> tuple[str, SessionSource, Optional[str]]:
+        """Route inbound gateway messages through the core A2A router.
+
+        Returns ``(message_text, source, early_reply)``. When ``early_reply`` is
+        set (kanban dispatch), the caller should return it to the user and skip
+        local agent execution.
+        """
+        try:
+            from hermes_cli.a2a_router import (
+                dispatch_to_kanban,
+                load_a2a_config,
+                route_prompt,
+            )
+            from hermes_cli.profiles import list_profiles, profile_exists
+        except Exception:
+            logger.debug("A2A router unavailable for gateway dispatch", exc_info=True)
+            return message_text, source, None
+
+        full_config = _load_gateway_config()
+        a2a_cfg = load_a2a_config(full_config)
+        if not a2a_cfg.enabled:
+            return message_text, source, None
+
+        current_profile = (getattr(source, "profile", None) or "").strip() or self._active_profile_name()
+        available_profiles = [p.name for p in list_profiles()]
+
+        route = await asyncio.to_thread(
+            route_prompt,
+            message_text,
+            current_profile,
+            available_profiles,
+            a2a_cfg,
+        )
+
+        prompt_for_target = route.rewritten_prompt or message_text
+
+        if route.mode == "kanban":
+            ok, detail = await asyncio.to_thread(
+                dispatch_to_kanban,
+                prompt_for_target,
+                route.target_profile,
+                a2a_cfg,
+            )
+            prefix = "A2A kanban" if ok else "A2A kanban failed"
+            logger.info(
+                "%s: %s → %s (%s) ok=%s",
+                prefix,
+                current_profile,
+                route.target_profile,
+                route.reason,
+                ok,
+            )
+            return message_text, source, detail
+
+        if route.target_profile != current_profile and profile_exists(route.target_profile):
+            logger.info(
+                "Gateway A2A route: %s → %s (%s)",
+                current_profile,
+                route.target_profile,
+                route.reason,
+            )
+            source = dataclasses.replace(source, profile=route.target_profile)
+
+        if prompt_for_target != message_text:
+            message_text = prompt_for_target
+
+        return message_text, source, None
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
         """Resolve the profile name for an inbound source via configured routes.

@@ -620,6 +620,10 @@ def _apply_profile_override() -> None:
     hermes_home_env = os.environ.get("HERMES_HOME", "")
     if profile_name is None and hermes_home_env:
         if Path(hermes_home_env).parent.name == "profiles":
+            if consume > 0:
+                os.environ["HERMES_EXPLICIT_PROFILE"] = "1"
+            else:
+                os.environ.pop("HERMES_EXPLICIT_PROFILE", None)
             return
 
     # 2. If no flag, check active_profile in the hermes root.
@@ -667,12 +671,111 @@ def _apply_profile_override() -> None:
                 f"Warning: profile override failed ({exc}), using default",
                 file=sys.stderr,
             )
+            if consume > 0:
+                os.environ["HERMES_EXPLICIT_PROFILE"] = "1"
+            else:
+                os.environ.pop("HERMES_EXPLICIT_PROFILE", None)
             return
         os.environ["HERMES_HOME"] = hermes_home
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0 and profile_index is not None:
             start = profile_index + 1  # +1 because argv is sys.argv[1:]
             sys.argv = sys.argv[:start] + sys.argv[start + consume :]
+
+    if consume > 0:
+        os.environ["HERMES_EXPLICIT_PROFILE"] = "1"
+    else:
+        os.environ.pop("HERMES_EXPLICIT_PROFILE", None)
+
+
+def _apply_a2a_cli_routing(args, prompt: str) -> tuple[str, int | None]:
+    """Run A2A routing for a CLI prompt before profile execution.
+
+    Returns ``(prompt, exit_code)``. ``exit_code`` is ``None`` when the caller
+    should continue with the (possibly rewritten) prompt. A non-``None`` exit
+    code means kanban dispatch finished and the process should exit.
+    """
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return prompt, None
+    if getattr(args, "no_a2a", False):
+        return prompt, None
+    if os.environ.get("HERMES_EXPLICIT_PROFILE") == "1":
+        return prompt, None
+    if getattr(args, "safe_mode", False):
+        return prompt, None
+
+    try:
+        from hermes_cli.a2a_router import (
+            dispatch_to_kanban,
+            format_a2a_console_line,
+            inject_a2a_execution_context,
+            load_a2a_config,
+            route_prompt,
+        )
+        from hermes_cli.config import load_config
+        from hermes_cli.profiles import get_active_profile_name, list_profiles, resolve_profile_env
+    except Exception as exc:
+        print(f"Warning: A2A routing unavailable ({exc})", file=sys.stderr)
+        return prompt, None
+
+    try:
+        full_config = load_config()
+        a2a_config = load_a2a_config(full_config)
+    except Exception as exc:
+        print(f"Warning: A2A config load failed ({exc})", file=sys.stderr)
+        return prompt, None
+
+    if not a2a_config.enabled:
+        return prompt, None
+
+    current_profile = get_active_profile_name() or "default"
+    available_profiles = [info.name for info in list_profiles()]
+    if not available_profiles:
+        available_profiles = [current_profile]
+
+    try:
+        route = route_prompt(
+            prompt=prompt,
+            current_profile=current_profile,
+            available_profiles=available_profiles,
+            config=a2a_config,
+        )
+    except Exception as exc:
+        print(f"Warning: A2A routing failed ({exc})", file=sys.stderr)
+        return prompt, None
+
+    inject_a2a_execution_context(route, from_profile=current_profile)
+
+    include_confidence = a2a_config.logging.include_confidence
+    if a2a_config.logging.enabled:
+        print(
+            format_a2a_console_line(
+                route,
+                from_profile=current_profile,
+                include_confidence=include_confidence,
+            ),
+            file=sys.stderr,
+        )
+
+    rewritten = (route.rewritten_prompt or prompt).strip() or prompt
+
+    if route.mode == "kanban":
+        ok, message = dispatch_to_kanban(rewritten, route.target_profile, a2a_config)
+        print(message, file=sys.stderr)
+        return rewritten, 0 if ok else 1
+
+    if route.mode == "direct" and route.target_profile != current_profile:
+        try:
+            os.environ["HERMES_HOME"] = resolve_profile_env(route.target_profile)
+        except Exception as exc:
+            print(
+                f"Warning: A2A profile switch to {route.target_profile!r} failed ({exc})",
+                file=sys.stderr,
+            )
+            return prompt, None
+
+    return rewritten, None
 
 
 _apply_profile_override()
@@ -2638,6 +2741,13 @@ def cmd_chat(args):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
     _pin_kanban_board_env()
+
+    query_val = getattr(args, "query", None)
+    if query_val:
+        query_val, a2a_rc = _apply_a2a_cli_routing(args, query_val)
+        if a2a_rc is not None:
+            sys.exit(a2a_rc)
+        args.query = query_val
 
     if use_tui:
         _launch_tui(
@@ -15414,8 +15524,11 @@ def _try_termux_fast_cli_launch() -> bool:
 
     if getattr(args, "oneshot", None):
         _prepare_agent_startup(args)
+        oneshot_prompt, a2a_rc = _apply_a2a_cli_routing(args, args.oneshot)
+        if a2a_rc is not None:
+            sys.exit(a2a_rc)
         _run_and_exit_oneshot(
-            args.oneshot,
+            oneshot_prompt,
             model=getattr(args, "model", None),
             provider=getattr(args, "provider", None),
             toolsets=getattr(args, "toolsets", None),
@@ -18060,8 +18173,11 @@ def main():
     # Handle top-level --oneshot / -z: single-shot mode, stdout = final
     # response only, nothing else. Bypasses cli.py entirely.
     if getattr(args, "oneshot", None):
+        oneshot_prompt, a2a_rc = _apply_a2a_cli_routing(args, args.oneshot)
+        if a2a_rc is not None:
+            sys.exit(a2a_rc)
         _run_and_exit_oneshot(
-            args.oneshot,
+            oneshot_prompt,
             model=getattr(args, "model", None),
             provider=getattr(args, "provider", None),
             toolsets=getattr(args, "toolsets", None),
