@@ -35,6 +35,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+# Canonical pricing resolver — shared cache + live OpenRouter/Ollama usage.
+# See hermes_pricing.py (single source of truth for $/M rates + GPU-tier proxies).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_pricing as hprice  # noqa: E402
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 COPILOT_MODELS_URL = "https://api.githubcopilot.com/models"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
@@ -808,7 +813,7 @@ def render_telegram_brief(
     elif wk_frac is not None and wk_frac > 0.70 and wk_rem < 3:
         mode_icon, mode_name = "🟠", "CONSERVATIVE"
         mode_action = "Ollama tight — L1 + Cursor fallback"
-        heavy_cfg = ("ollama-cloud", "gemma4:31b")
+        heavy_cfg = ("ollama-cloud", "nemotron-3-super")
         mid_cfg   = ("ollama-cloud", "gpt-oss:20b")
         light_cfg = ("ollama-cloud", "gpt-oss:20b")
     elif wk_frac is None or wk_frac < 0.40:
@@ -816,12 +821,12 @@ def render_telegram_brief(
         mode_action = "Ollama healthy — L2/L3 freely"
         heavy_cfg = ("ollama-cloud", "kimi-k2.7-code")
         mid_cfg   = ("ollama-cloud", "deepseek-v4-flash")
-        light_cfg = ("ollama-cloud", "gemma4:31b")
+        light_cfg = ("ollama-cloud", "nemotron-3-super")
     else:
         mode_icon, mode_name = "🟡", "BALANCED"
         mode_action = "Ollama mid — L1/L2 + Cursor fallback"
         heavy_cfg = ("ollama-cloud", "deepseek-v4-flash")
-        mid_cfg   = ("ollama-cloud", "gemma4:31b")
+        mid_cfg   = ("ollama-cloud", "nemotron-3-super")
         light_cfg = ("ollama-cloud", "gpt-oss:20b")
 
     # ── Budget status icons ───────────────────────────────────────────────────
@@ -1259,6 +1264,7 @@ def analyze_spend(window_days: int = 1) -> dict:
                 "gpt-5.3-codex": (1.75, 14.00),
                 "claude-sonnet-4.6": (3.00, 15.00),
                 "deepseek-v4-flash": (0.14, 0.28),
+                "deepseek-v4-flash:0731": (0.09, 0.18),
             }
             rate = OR_RATES.get(norm) or OR_RATES.get(model)
             if not rate:
@@ -2046,7 +2052,7 @@ def render_budget_section(
                 "Stop Ollama L2+ immediately. Move all profiles to Copilot or Cursor.")
         elif routing_mode == "conservative":
             recs.append(
-                "🟠 **Ollama quota tight** — only L1 models safe (`gpt-oss:20b`, `gemma4:31b`). "
+                "🟠 **Ollama quota tight** — only L1 models safe (`gpt-oss:20b`, `nemotron-3-super`). "
                 "Avoid `minimax-m2.7`, `kimi-*`, `glm-*` until quota resets.")
         elif routing_mode == "power":
             recs.append(
@@ -2135,7 +2141,7 @@ def render_budget_section(
             "desc": "Ollama tight — L1 only + Cursor pinned fallback",
             "when": "Ollama weekly quota 70–90% and ≤3d remaining",
             "heavy": {
-                "model": "gemma4:31b",
+                "model": "nemotron-3-super",
                 "provider": "ollama-cloud",
                 "fallback": 'fallback_providers: \'[{"provider":"cursor","model":"claude-sonnet-4.6"},{"provider":"copilot","model":"claude-sonnet-4.6"}]\'',
             },
@@ -2161,7 +2167,7 @@ def render_budget_section(
                 "fallback": 'fallback_providers: \'[{"provider":"cursor","model":"claude-sonnet-4.6"},{"provider":"copilot","model":"claude-sonnet-4.6"}]\'',
             },
             "mid": {
-                "model": "gemma4:31b",
+                "model": "nemotron-3-super",
                 "provider": "ollama-cloud",
                 "fallback": 'fallback_providers: \'[{"provider":"cursor","model":"kimi-k2.7-code"}]\'',
             },
@@ -2184,10 +2190,10 @@ def render_budget_section(
             "mid": {
                 "model": "deepseek-v4-flash",
                 "provider": "ollama-cloud",
-                "fallback": 'fallback_providers: \'[{"provider":"ollama-cloud","model":"gemma4:31b"},{"provider":"cursor","model":"kimi-k2.7-code"}]\'',
+                "fallback": 'fallback_providers: \'[{"provider":"ollama-cloud","model":"nemotron-3-super"},{"provider":"cursor","model":"kimi-k2.7-code"}]\'',
             },
             "light": {
-                "model": "gemma4:31b",
+                "model": "nemotron-3-super",
                 "provider": "ollama-cloud",
                 "fallback": 'fallback_providers: \'[{"provider":"cursor","model":"gpt-5.4-nano"}]\'',
             },
@@ -2288,7 +2294,7 @@ def render_consumption_analysis(budget: dict) -> list[str]:
         "minimax-m2.5":          (0.20, 0.02,  0.80),
         "minimax-m3":            (0.80, 0.08,  3.20),
         "deepseek-v4-flash":     (0.14, 0.014, 0.28),
-        "deepseek-v4-flash:0731":(0.14, 0.014, 0.28),
+        "deepseek-v4-flash:0731":(0.09, 0.009, 0.18),
         "deepseek-v4-pro":       (3.00, 0.30, 12.00),
         "gemma4:31b":            (0.03, 0.003, 0.12),
         "gpt-oss:20b":           (0.03, 0.003, 0.12),
@@ -2491,7 +2497,7 @@ def render_consumption_analysis(budget: dict) -> list[str]:
          "Best agentic code model at $1.75/M",            "~$150/mo credits"),
         ("specifier",    "copilot:claude-sonnet-4.6","cursor:kimi-k2.7-code",
          "Code-focused, tools, 3× cheaper",               "~$40/mo credits"),
-        ("default",      "copilot:claude-sonnet-4.6","ollama:gemma4:31b → cursor:kimi-k2.7-code",
+        ("default",      "copilot:claude-sonnet-4.6","ollama:nemotron-3-super → cursor:kimi-k2.7-code",
          "L1 quota-cheap first, Cursor flat fallback",    "~$60/mo credits"),
         ("researcher",   "ollama:minimax-m2.7",       "ollama:deepseek-v4-flash → cursor:gemini-3.6-flash",
          "Same L2 price, 1M ctx for long docs",           "quota neutral"),
@@ -2586,9 +2592,9 @@ def render_master_cost_table(
         "kimi-k3":                   (1_048_576, 3.00,  15.00),
         # GLM (OR live)
         "glm-5.2":                   (1_048_576, 0.76,   2.39),
-        # DeepSeek (OR live — corrected from $0.20 to $0.14)
+        # DeepSeek (OR live 2026-08-05 — pinned :0731 is CHEAPER than bare)
         "deepseek-v4-flash":         (1_048_576, 0.14,   0.28),
-        "deepseek-v4-flash:0731":    (1_048_576, 0.14,   0.28),
+        "deepseek-v4-flash:0731":    (1_048_576, 0.09,   0.18),
         # Microsoft / GitHub specific
         "mai-code-1-flash":          (200_000,   0.75,   4.50),
         "raptor-mini":               (200_000,   0.25,   2.00),
@@ -3008,7 +3014,27 @@ def main():
             ollama_ok = True
             emit_tier_map(ollama_rows)
 
-    pricing_data = fetch_openrouter_pricing()
+    # Pricing: read the canonical shared cache (refreshed by hermes_pricing /
+    # daily run) then refresh it from live sources. This keeps every consumer
+    # on the same numbers instead of divergent hardcoded tables.
+    hprice_cache = hprice.read_cache()
+    if not hprice_cache.get("per_m"):
+        hprice.refresh_cache()
+        hprice_cache = hprice.read_cache()
+    else:
+        # Best-effort live refresh (cheap, non-fatal on failure).
+        hprice.refresh_cache()
+        hprice_cache = hprice.read_cache()
+
+    # Convert canonical cache (per_m: {in,out,ctx}) to the OR pricing format this
+    # script's renderers expect (prompt/completion per-token strings + ctx).
+    pricing_data: dict[str, dict] = {}
+    for or_id, p in (hprice_cache.get("per_m") or {}).items():
+        pricing_data[or_id] = {
+            "prompt": str(p.get("in", 0) / 1_000_000),
+            "completion": str(p.get("out", 0) / 1_000_000),
+            "context_length": p.get("ctx"),
+        }
     token = get_gh_token()
     copilot_ok = False
     copilot_models: list[dict] = []
