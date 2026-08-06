@@ -22,6 +22,7 @@ from agent.credential_persistence import (
     sanitize_borrowed_credential_payload,
 )
 import hermes_cli.auth as auth_mod
+from agent.ollama_quota_cache import get_exhausted_env_vars as _get_exhausted_ollama_keys
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     PROVIDER_REGISTRY,
@@ -1611,12 +1612,29 @@ class CredentialPool:
         cleared_any = False
         entries_to_prune: List[str] = []
         available: List[PooledCredential] = []
+        # Proactive Ollama Cloud quota skip: consult the daily quota cache ONCE
+        # per selection so keys whose weekly quota is exhausted are never
+        # selected in the first place. This avoids the reactive 429 -> rotate
+        # round-trip. The cache helper does a local file read all day and only
+        # hits the network once per UTC day (first request). Empty on any
+        # failure -> pool keeps working, reactive 429 rotation backstops.
+        exhausted_ollama_envs = (
+            _get_exhausted_ollama_keys()
+            if self.provider == "ollama-cloud"
+            else frozenset()
+        )
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load.  A stale duplicate row
             # can remain unhydrated; never lease or select it as an empty key.
             if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
                 continue
+            # Skip an Ollama Cloud key whose daily cache says its weekly quota
+            # is exhausted — pick the next healthy key instead.
+            if exhausted_ollama_envs and entry.source.startswith("env:"):
+                _env_name = entry.source.split(":", 1)[1]
+                if _env_name in exhausted_ollama_envs:
+                    continue
             # For anthropic claude_code entries, sync from the credentials file
             # before any status/refresh checks. This picks up tokens refreshed
             # by other processes (Claude Code CLI, other Hermes profiles).
