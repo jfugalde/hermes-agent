@@ -7,11 +7,11 @@ selected key returns 429 (quota exhausted), Hermes marks it and rotates to the
 next key. That works but pays the price of one failed request per exhausted key.
 
 This module makes the pool PROACTIVE. It maintains a small daily cache file
-mapping each OLLAMA_*_KEY env var -> its weekly quota usage (0..1) + healthy
-flag. The pool reads this file on the hot path (fast, local, no network). The
-file is refreshed once per UTC day — the "first request of the day" becomes the
-cache filler — so availability is decided from a local read for the rest of the
-day instead of a live API call per request.
+mapping each OLLAMA_*_KEY env var -> its weekly quota usage (0..1). The pool
+reads this file on the hot path (fast, local, no network). The file is
+refreshed once per UTC day — the "first request of the day" becomes the cache
+filler — so availability is decided from a local read for the rest of the day
+instead of a live API call per request.
 
 File location: $HERMES_HOME/cache/ollama-quota-daily.json
   HERMES_HOME defaults to ~/.hermes (same convention as the quota watchdog).
@@ -21,18 +21,24 @@ Schema:
       "date": "2026-08-06",            # UTC date the snapshot was taken
       "updated_ts": 1722941234.0,
       "keys": {
-        "OLLAMA_API_KEY":          {"usage": 0.969, "healthy": false},
-        "OLLAMA_API_KEY_FALLBACK": {"usage": 0.0,   "healthy": true}
+        "OLLAMA_API_KEY":          {"usage": 0.969, "fp": "a1b2c3d4e5f6"},
+        "OLLAMA_API_KEY_FALLBACK": {"usage": 0.0,   "fp": "f7e8d9c0b1a2"}
       }
     }
 
-A key is "healthy" = its weekly usage fraction is below OLLAMA_QUOTA_THRESHOLD.
+Each entry stores the RAW usage fraction plus a non-secret fingerprint of the
+key, so a key rotation mid-day invalidates that entry (a fresh key inherits no
+stale status). The "healthy" status is derived at read time from the current
+threshold — never baked into the cache — so tuning the threshold never requires
+a cache refresh.
+
 Stdlib + urllib only; no hermes deps, so importing this module cannot create an
 import cycle with the credential pool.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.request
@@ -41,11 +47,16 @@ from pathlib import Path
 
 USAGE_URL = "https://ollama.com/api/usage"
 # Switch away from a key once its weekly quota reaches this fraction consumed.
-# 0.95 = skip a key that has burned 95% of its weekly quota. Tune via env.
+# 0.95 = skip a key that has burned 95% of its weekly quota.
 DEFAULT_QUOTA_THRESHOLD = 0.95
 CACHE_FILENAME = "ollama-quota-daily.json"
 
 _ENV_KEYS = ("OLLAMA_API_KEY", "OLLAMA_API_KEY_FALLBACK", "OLLAMA_API_KEY_2")
+
+# Status strings returned by get_ollama_key_status().
+STATUS_OK = "ok"
+STATUS_AT_RISK = "at_risk"  # crossed threshold but not exhausted — skip only if a healthier key exists
+STATUS_EXHAUSTED = "exhausted"  # usage >= 1.0 — always skip
 
 
 def _hermes_home() -> Path:
@@ -56,43 +67,47 @@ def _cache_path() -> Path:
     return _hermes_home() / "cache" / CACHE_FILENAME
 
 
-def _threshold() -> float:
-    try:
-        return float(os.environ.get("OLLAMA_QUOTA_THRESHOLD", DEFAULT_QUOTA_THRESHOLD))
-    except (TypeError, ValueError):
-        return DEFAULT_QUOTA_THRESHOLD
+def _fingerprint(key: str) -> str:
+    """Non-secret, stable identity for a key value (short sha256)."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
 def _load_env_keys() -> dict[str, str]:
     """Return {env_var: secret} for every OLLAMA_*_KEY we can resolve.
 
-    Mirrors the watchdog's key loading: prefer the process environment, then
-    fall back to $HERMES_HOME/.env (the authoritative file `hermes setup`
-    writes). Returns only non-empty secrets.
+    Matches the credential pool's dotenv-authoritative precedence
+    (``_seed_from_env``): the ``$HERMES_HOME/.env`` value is authoritative and
+    wins over a (possibly stale) inherited process env var. The only exception:
+    when the .env holds an unresolved ``op://`` reference, the resolved value
+    supplied by the process env / secret scope is used instead. This mirrors
+    ``_seed_from_env``'s ``_get_env_prefer_dotenv`` behavior exactly, so the
+    quota probe and the pool always evaluate the SAME credential.
     """
     secrets: dict[str, str] = {}
 
-    def _grab(env_file: Path | None) -> None:
-        if env_file is not None and env_file.is_file():
-            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if "=" not in line:
-                    continue
-                name, _, val = line.partition("=")
-                name = name.strip()
-                if name not in _ENV_KEYS:
-                    continue
-                val = val.strip().strip('"').strip("'")
-                if val:
-                    secrets.setdefault(name, val)
+    # 1. .env is authoritative (matches _seed_from_env).
+    env_file = _hermes_home() / ".env"
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if "=" not in line:
+                continue
+            name, _, val = line.partition("=")
+            name = name.strip()
+            if name not in _ENV_KEYS:
+                continue
+            val = val.strip().strip('"').strip("'")
+            if val:
+                secrets[name] = val
 
-    # Prefer explicit env (gateway sets the active profile's keys in env).
+    # 2. Fill missing keys / resolve op:// refs from the process env.
     for name in _ENV_KEYS:
         v = (os.environ.get(name) or "").strip()
-        if v:
-            secrets.setdefault(name, v)
-    # Fall back to the .env file for any OLLAMA_* key not already in env.
-    _grab(_hermes_home() / ".env")
+        if not v:
+            continue
+        if name not in secrets or secrets[name].startswith("op://"):
+            secrets[name] = v
+
     return secrets
 
 
@@ -142,14 +157,10 @@ def _cache_stale(cache: dict | None) -> bool:
     return not isinstance(cache.get("keys"), dict)
 
 
-def _snapshot_from_usage(usage_by_env: dict[str, float]) -> dict:
-    threshold = _threshold()
+def _snapshot_from_usage(usage_by_env: dict[str, str], usage: dict[str, float]) -> dict:
     keys = {
-        name: {
-            "usage": round(usage, 4),
-            "healthy": usage < threshold,
-        }
-        for name, usage in usage_by_env.items()
+        name: {"usage": round(usage.get(name, 0.0), 4), "fp": _fingerprint(secret)}
+        for name, secret in usage_by_env.items()
     }
     return {"date": _today_utc(), "updated_ts": datetime.now(timezone.utc).timestamp(), "keys": keys}
 
@@ -158,8 +169,9 @@ def refresh_daily_cache() -> dict:
     """Fill/refresh the daily cache with a live query of every known key.
 
     Call this on the first request of the day (or when the cache is stale).
-    Network failure is tolerated: we return a cache whose keys are all marked
-    healthy (so the pool keeps working and the reactive 429 rotation backstops).
+    Network failure is tolerated: a failing key is recorded at 0.0 usage (so
+    it stays available and the reactive 429 rotation backstops), and a key that
+    cannot be reached is not dropped from the pool.
     """
     keys = _load_env_keys()
     usage_by_env: dict[str, float] = {}
@@ -167,29 +179,57 @@ def refresh_daily_cache() -> dict:
         try:
             usage_by_env[name] = _fetch_usage(secret)
         except Exception:
-            # A single key failing to report shouldn't sink the snapshot.
             usage_by_env[name] = 0.0  # assume healthy; reactive 429 catches it
-    snapshot = _snapshot_from_usage(usage_by_env)
+    snapshot = _snapshot_from_usage(keys, usage_by_env)
     _write_cache(snapshot)
     return snapshot
 
 
-def get_exhausted_env_vars() -> set[str]:
-    """Return the set of OLLAMA_*_KEY env var names that are over quota.
+def get_ollama_key_status(threshold: float = DEFAULT_QUOTA_THRESHOLD) -> dict[str, str]:
+    """Return {env_var: status} for each known Ollama key.
 
-    Fast path: reads the local daily cache. If the cache is missing or from a
-    previous day, performs ONE network refresh (the day's cache filler). Never
-    raises — returns an empty set on any failure so the pool keeps functioning.
+    Status is one of STATUS_OK / STATUS_AT_RISK / STATUS_EXHAUSTED and is
+    derived at read time from the current threshold — never from a stale cache
+    flag — so tuning the threshold never requires a cache refresh.
+
+    Fast path: reads the local daily cache. If the cache is missing, from a
+    previous day, OR a key's stored fingerprint no longer matches the current
+    credential (rotation mid-day), the whole cache is refreshed once. Never
+    raises — returns STATUS_OK for every key on any failure so the pool keeps
+    functioning (the reactive 429 rotation backstops).
     """
     try:
+        keys = _load_env_keys()
         cache = _read_cache()
-        if _cache_stale(cache):
+        cached_keys = (cache or {}).get("keys") or {}
+        needs_refresh = _cache_stale(cache)
+        if not needs_refresh:
+            # A key whose fingerprint changed mid-day must be re-probed so it
+            # doesn't inherit a stale exhausted status. Refresh the whole file
+            # once (cheap, one day's first rotation).
+            for name, secret in keys.items():
+                cached = cached_keys.get(name)
+                if not isinstance(cached, dict) or cached.get("fp") != _fingerprint(secret):
+                    needs_refresh = True
+                    break
+        if needs_refresh:
             cache = refresh_daily_cache()
-        keys = (cache or {}).get("keys") or {}
-        return {
-            name
-            for name, meta in keys.items()
-            if isinstance(meta, dict) and not meta.get("healthy", True)
-        }
+            cached_keys = (cache or {}).get("keys") or {}
+
+        status: dict[str, str] = {}
+        for name in keys:
+            usage = cached_keys.get(name, {}).get("usage", 0.0) if isinstance(
+                cached_keys.get(name), dict
+            ) else 0.0
+            status[name] = _status_from_usage(float(usage), threshold)
+        return status
     except Exception:
-        return set()
+        return {name: STATUS_OK for name in _load_env_keys()}
+
+
+def _status_from_usage(usage: float, threshold: float) -> str:
+    if usage >= 1.0:
+        return STATUS_EXHAUSTED
+    if usage >= threshold:
+        return STATUS_AT_RISK
+    return STATUS_OK
