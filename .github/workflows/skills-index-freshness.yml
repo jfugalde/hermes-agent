@@ -8,9 +8,7 @@ name: Skills Index Freshness Check
 # Triggered every 4 hours so we catch a stuck cron within one tick.
 
 on:
-  schedule:
-    - cron: '0 */4 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Manual trigger only for this fork — schedule disabled
 
 permissions:
   contents: read
