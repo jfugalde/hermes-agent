@@ -2842,6 +2842,24 @@ def load_pool(provider: str) -> CredentialPool:
     else:
         singleton_changed, singleton_sources = _seed_from_singletons(provider, entries)
         env_changed, env_sources = _seed_from_env(provider, entries)
+        # Rehydrate env-sourced entries whose access_token is empty.
+        # _seed_from_env only processes vars listed in PROVIDER_REGISTRY but
+        # users may add extra pool entries via `hermes auth` or auth.json with
+        # source "env:SOME_VAR".  Those entries persist on disk but their
+        # access_token is never populated unless we resolve it here.
+        _env_file = load_env()
+        for i, entry in enumerate(entries):
+            if (
+                entry.source.startswith("env:")
+                and entry.auth_type == AUTH_TYPE_API_KEY
+                and not entry.access_token
+            ):
+                env_var = entry.source[len("env:"):]
+                raw = (_env_file.get(env_var) or "").strip()
+                token = (_get_secret(env_var, "") or "").strip() if raw.startswith("op://") else (raw or (_get_secret(env_var, "") or "").strip())
+                if token:
+                    entries[i] = replace(entry, access_token=token)
+                    env_changed = True
         changed = (
             raw_needs_sanitization
             or raw_needs_auth_normalization
