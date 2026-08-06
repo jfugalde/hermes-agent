@@ -1,5 +1,8 @@
 name: Label rerun
 
+# DISABLED for this fork. Part of the upstream review-labels flow, which the
+# slimmed ci.yml no longer runs. Kept for reference only; no PR trigger.
+#
 # When the ``ci-reviewed`` label is added to a PR, rerun all failed jobs in
 # the latest CI run. This re-evaluates ``review-labels`` (which now sees the
 # label) and GitHub automatically reruns dependent jobs (``comment-live``,
@@ -11,8 +14,7 @@ name: Label rerun
 # silently failing and leaving the reviewer stuck.
 
 on:
-  pull_request:
-    types: [labeled]
+  workflow_dispatch:
 
 permissions:
   actions: write
