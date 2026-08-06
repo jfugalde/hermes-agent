@@ -36,6 +36,15 @@ _slack_directory_warning_last: Dict[tuple[str, str], float] = {}
 CHANNEL_ALIASES_PATH = get_hermes_home() / "channel_aliases.json"
 
 
+def _s(value):
+    """Coerce sqlite row bytes/None to str or None."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode('utf-8', errors='replace')
+    return str(value)
+
+
 def _load_channel_aliases() -> Dict[str, Dict[str, str]]:
     if not CHANNEL_ALIASES_PATH.exists():
         return {}
@@ -95,22 +104,22 @@ def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
 
 
 def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
-    chat_id = origin.get("chat_id")
+    chat_id = _s(origin.get("chat_id"))
     if not chat_id:
         return None
-    thread_id = origin.get("thread_id")
+    thread_id = _s(origin.get("thread_id"))
     if thread_id:
         return f"{chat_id}:{thread_id}"
     return str(chat_id)
 
 
 def _session_entry_name(origin: Dict[str, Any]) -> str:
-    base_name = origin.get("chat_name") or origin.get("user_name") or str(origin.get("chat_id"))
-    thread_id = origin.get("thread_id")
+    base_name = _s(origin.get("chat_name")) or _s(origin.get("user_name")) or str(_s(origin.get("chat_id")))
+    thread_id = _s(origin.get("thread_id"))
     if not thread_id:
         return base_name
 
-    topic_label = origin.get("chat_topic") or f"topic {thread_id}"
+    topic_label = _s(origin.get("chat_topic")) or f"topic {thread_id}"
     return f"{base_name} / {topic_label}"
 
 
@@ -406,9 +415,9 @@ def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
                     pass
             if not origin:
                 origin = {
-                    "chat_id": row.get("chat_id"),
-                    "thread_id": row.get("thread_id"),
-                    "chat_name": row.get("display_name"),
+                    "chat_id": _s(row.get("chat_id")),
+                    "thread_id": _s(row.get("thread_id")),
+                    "chat_name": _s(row.get("display_name")),
                 }
             entry_id = _session_entry_id(origin)
             if not entry_id or entry_id in seen_ids:
@@ -417,8 +426,8 @@ def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
             entries.append({
                 "id": entry_id,
                 "name": _session_entry_name(origin),
-                "type": row.get("chat_type") or "dm",
-                "thread_id": origin.get("thread_id"),
+                "type": _s(row.get("chat_type")) or "dm",
+                "thread_id": _s(origin.get("thread_id")),
             })
     except Exception as e:
         logger.debug(
