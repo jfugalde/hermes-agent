@@ -22,6 +22,12 @@ from agent.credential_persistence import (
     sanitize_borrowed_credential_payload,
 )
 import hermes_cli.auth as auth_mod
+from agent.ollama_quota_cache import (
+    STATUS_AT_RISK as OLLAMA_STATUS_AT_RISK,
+    STATUS_EXHAUSTED as OLLAMA_STATUS_EXHAUSTED,
+    STATUS_OK as OLLAMA_STATUS_OK,
+    get_ollama_key_status,
+)
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     PROVIDER_REGISTRY,
@@ -1600,6 +1606,25 @@ class CredentialPool:
                 self._unmatched_rotation_streak = 0
             return entry
 
+    def _ollama_quota_threshold(self) -> float:
+        """Read the Ollama Cloud quota-skip threshold from config.yaml.
+
+        Lives under ``tools.ollama.quota_threshold`` (non-secret behavioral
+        setting, per AGENTS.md — config, not env). Falls back to the module
+        default when unset. Reads once per selection; cheap.
+        """
+        try:
+            config = _load_config_safe()
+            tools = (config or {}).get("tools") or {}
+            ollama_cfg = tools.get("ollama") or {}
+            raw = ollama_cfg.get("quota_threshold")
+            if raw is not None:
+                return float(raw)
+        except Exception:
+            pass
+        from agent.ollama_quota_cache import DEFAULT_QUOTA_THRESHOLD
+        return DEFAULT_QUOTA_THRESHOLD
+
     def _available_entries(self, *, clear_expired: bool = False, refresh: bool = False) -> List[PooledCredential]:
         """Return entries not currently in exhaustion cooldown.
 
@@ -1611,12 +1636,50 @@ class CredentialPool:
         cleared_any = False
         entries_to_prune: List[str] = []
         available: List[PooledCredential] = []
+        # Proactive Ollama Cloud quota skip: consult the daily quota cache ONCE
+        # per selection so keys whose weekly quota is exhausted are never
+        # selected in the first place. This avoids the reactive 429 -> rotate
+        # round-trip. The cache helper does a local file read all day and only
+        # hits the network once per UTC day (first request). Empty on any
+        # failure -> pool keeps working, reactive 429 rotation backstops.
+        #
+        # Status semantics:
+        #   - EXHAUSTED (usage >= 1.0): always skip — the key genuinely has no
+        #     quota left, so selecting it guarantees a 429.
+        #   - AT_RISK (threshold <= usage < 1.0): skip ONLY if another usable
+        #     key exists. If this is the last usable credential, keep it so a
+        #     single-key setup (or a nearly-depleted only key) still works
+        #     instead of returning None with 5% of quota left.
+        ollama_status: dict[str, str] = {}
+        if self.provider == "ollama-cloud":
+            ollama_status = get_ollama_key_status(self._ollama_quota_threshold())
+        # An at-risk env key is only skippable if at least one OTHER env key
+        # is usable (OK or at-risk). Env-exhausted keys never count as usable.
+        # This preserves the last usable credential: with a single key that has
+        # crossed the threshold but still has quota left, we keep selecting it
+        # rather than returning None.
+        usable_env_count = sum(
+            1 for e in self._entries
+            if e.source.startswith("env:")
+            and ollama_status.get(e.source.split(":", 1)[1]) in (OLLAMA_STATUS_OK, OLLAMA_STATUS_AT_RISK)
+        )
+        can_skip_at_risk = usable_env_count > 1
+
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load.  A stale duplicate row
             # can remain unhydrated; never lease or select it as an empty key.
             if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
                 continue
+            # Skip an Ollama Cloud key that is exhausted (or at-risk when a
+            # healthier key exists) — pick the next usable key instead.
+            if ollama_status and entry.source.startswith("env:"):
+                _env_name = entry.source.split(":", 1)[1]
+                _st = ollama_status.get(_env_name)
+                if _st == OLLAMA_STATUS_EXHAUSTED:
+                    continue
+                if _st == OLLAMA_STATUS_AT_RISK and can_skip_at_risk:
+                    continue
             # For anthropic claude_code entries, sync from the credentials file
             # before any status/refresh checks. This picks up tokens refreshed
             # by other processes (Claude Code CLI, other Hermes profiles).
