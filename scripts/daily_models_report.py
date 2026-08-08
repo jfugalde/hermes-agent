@@ -1136,7 +1136,6 @@ def write_report_files(full_md: str, stamp: str) -> tuple[Path, Path]:
 
 SPEND_OLLAMA_LIKE = "%ollama.com%"
 SPEND_COPILOT_LIKE = "%githubcopilot.com%"
-SPEND_CURSOR_NATIVE = "cursor://%"   # old native cursor://agent
 SPEND_CURSOR_GO = "%127.0.0.1:9101%"  # cursor-go-adapter
 
 
@@ -1220,17 +1219,8 @@ def analyze_spend(window_days: int = 1) -> dict:
 
         ollama_usage = _query_usage(SPEND_OLLAMA_LIKE)
         copilot_usage = _query_usage(SPEND_COPILOT_LIKE)
-        # Merge cursor://agent (native) + cursor-go-adapter (:9101) into one dict
-        cursor_native = _query_usage(SPEND_CURSOR_NATIVE)
-        cursor_go     = _query_usage(SPEND_CURSOR_GO)
-        cursor_usage: dict[str, dict] = {}
-        for src in (cursor_native, cursor_go):
-            for model, u in src.items():
-                if model in cursor_usage:
-                    for k in ("calls", "intok", "outtok", "sess", "sub_calls"):
-                        cursor_usage[model][k] += u[k]
-                else:
-                    cursor_usage[model] = dict(u)
+        # cursor-go-adapter (:9101) is the only Cursor backend now (SDK bridge retired)
+        cursor_usage: dict[str, dict] = _query_usage(SPEND_CURSOR_GO)
 
         all_usage = {**ollama_usage}  # start with Ollama (has latency data)
 

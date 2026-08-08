@@ -1896,8 +1896,8 @@ def _make_acp_agent(provider="copilot-acp", base_url="acp://copilot"):
 class TestCopilotACPStreamingDecision:
     """Verify streaming decision for ACP / Cursor runtimes.
 
-    Local CopilotACPClient and CursorAgentClient now yield live deltas, so
-    ``copilot-acp`` / ``acp://copilot`` / ``cursor://`` keep streaming enabled.
+    Local CopilotACPClient now yields live deltas, so
+    ``copilot-acp`` / ``acp://copilot`` keep streaming enabled.
     TCP ACP transports still force non-streaming.
     """
 
