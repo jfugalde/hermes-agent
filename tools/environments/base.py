@@ -1015,6 +1015,15 @@ class BaseEnvironment(ABC):
             except Exception:
                 pass  # cleanup is best-effort
             raise
+        finally:
+            # ``poll()`` observes an exited child, but alternate ProcessHandle
+            # implementations are not required to reap it.  Always wait here
+            # so every natural, timeout, interrupt, and exception path collects
+            # the direct shell child before returning to a long-lived gateway.
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
 
         # Drain thread now exits promptly after bash does (~300ms idle
         # check).  A short join is enough; a long one would be a bug since
