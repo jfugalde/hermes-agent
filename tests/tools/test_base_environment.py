@@ -4,6 +4,9 @@ Tests _wrap_command(), _extract_cwd_from_output(), _embed_stdin_heredoc(),
 init_session() failure handling, and the CWD marker contract.
 """
 
+import subprocess
+import sys
+import time
 from unittest.mock import MagicMock
 
 from tools.environments.base import BaseEnvironment, _BoundedOutputCollector
@@ -38,6 +41,36 @@ class TestBoundedOutputCollector:
         assert rendered.startswith("HEAD-SENTINEL")
         assert rendered.endswith("TAIL-SENTINEL")
         assert "[OUTPUT TRUNCATED" in rendered
+
+
+class TestProcessReaping:
+    def test_natural_exit_waits_on_process_handle(self):
+        env = _TestableEnv()
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        proc.returncode = 0
+        proc.stdout = None
+
+        result = env._wait_for_process(proc, timeout=5)
+
+        assert result["returncode"] == 0
+        proc.wait.assert_called_once_with(timeout=2)
+
+    def test_timeout_is_reaped(self):
+        env = _TestableEnv()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        started = time.monotonic()
+        result = env._wait_for_process(proc, timeout=0.01)
+
+        assert result["returncode"] == 124
+        assert proc.wait(timeout=0) is not None
+        assert time.monotonic() - started < 5
 
     def test_small_stream_is_unchanged(self):
         collector = _BoundedOutputCollector(100)
