@@ -4414,40 +4414,6 @@ def validate_requested_model(
                 "message": f"Could not read MoA presets: {exc}",
             }
 
-    # Cursor provider: non-HTTP scheme (cursor://agent), validate against known models
-    if normalized == "cursor":
-        try:
-            from hermes_cli.config import load_config
-
-            cfg = load_config()
-            providers = cfg.get("providers", {})
-            cursor_cfg = providers.get("cursor", {})
-            cursor_models = cursor_cfg.get("models", [])
-            if requested in cursor_models:
-                return {"accepted": True, "persist": True, "recognized": True, "message": None}
-            if cursor_models:
-                return {
-                    "accepted": True,
-                    "persist": True,
-                    "recognized": False,
-                    "message": f"Note: `{requested}` is not in the configured cursor models list ({', '.join(cursor_models)}). The model may still work.",
-                }
-            # No models defined - accept anyway (cursor://agent doesn't expose a model list)
-            return {
-                "accepted": True,
-                "persist": True,
-                "recognized": False,
-                "message": "Note: Cursor provider uses cursor://agent (non-HTTP endpoint). Model validation skipped.",
-            }
-        except Exception:
-            # Accept anyway - cursor validation is best-effort
-            return {
-                "accepted": True,
-                "persist": True,
-                "recognized": False,
-                "message": "Note: Cursor provider validation skipped (non-HTTP endpoint).",
-            }
-
     if any(ch.isspace() for ch in requested):
         return {
             "accepted": False,

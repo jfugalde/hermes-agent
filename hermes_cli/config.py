@@ -5380,9 +5380,9 @@ def _normalize_custom_provider_entry(
                 base_url = candidate
                 break
             parsed = urlparse(candidate)
-            # Allow known non-HTTP schemes (cursor://agent, moa://local, etc.)
+            # Allow known non-HTTP schemes (moa://local, etc.)
             # These are handled specially at runtime and don't need HTTP scheme+host
-            known_non_http_schemes = ("cursor://", "moa://")
+            known_non_http_schemes = ("moa://",)
             if any(candidate.strip().lower().startswith(s) for s in known_non_http_schemes):
                 base_url = candidate
                 break

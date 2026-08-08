@@ -2149,11 +2149,6 @@ def run_conversation(
                 # Local CopilotACPClient now yields live session/update deltas.
                 elif str(agent.base_url or "").lower().startswith("acp+tcp://"):
                     _use_streaming = False
-                elif agent.provider in {"cursor"} or str(agent.base_url or "").lower().startswith(
-                    "cursor://"
-                ):
-                    # Cursor Agent SDK shim streams when possible; keep enabled.
-                    pass
                 # MoA streams only when a display/TTS consumer is present to
                 # receive the deltas. MoAChatCompletions.create() honors
                 # stream=True (runs the references, then returns the aggregator's
