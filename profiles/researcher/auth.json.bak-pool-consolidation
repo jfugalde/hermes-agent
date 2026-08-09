@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "providers": {},
+  "credential_pool": {
+    "ollama-cloud": [
+      {
+        "id": "3c774a",
+        "label": "OLLAMA_API_KEY",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "env:OLLAMA_API_KEY",
+        "last_status": "ok",
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://ollama.com/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:bd82eb2dff10b11e"
+      },
+      {
+        "id": "29e20d",
+        "label": "OLLAMA_API_KEY_FALLBACK",
+        "auth_type": "api_key",
+        "priority": 1,
+        "source": "env:OLLAMA_API_KEY_FALLBACK",
+        "last_status": "ok",
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://ollama.com/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:22411d36447e7921"
+      }
+    ],
+    "copilot": [
+      {
+        "id": "78418a",
+        "label": "GITHUB_TOKEN",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "env:GITHUB_TOKEN",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://api.githubcopilot.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:43f68c2531653ec1"
+      },
+      {
+        "id": "cf08eb",
+        "label": "GH_TOKEN",
+        "auth_type": "api_key",
+        "priority": 1,
+        "source": "env:GH_TOKEN",
+        "last_status": "ok",
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://api.githubcopilot.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:b08bd27f0bc1f15c"
+      },
+      {
+        "id": "d361b9",
+        "label": "gh auth token",
+        "auth_type": "api_key",
+        "priority": 2,
+        "source": "gh_cli",
+        "last_status": "exhausted",
+        "last_status_at": 1786212965.4561598,
+        "last_error_code": 429,
+        "last_error_reason": null,
+        "last_error_message": "quota exceeded",
+        "last_error_reset_at": 1788220799.4558809,
+        "base_url": "https://api.githubcopilot.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:7aabb84a82fd3b0e"
+      }
+    ]
+  },
+  "active_provider": null,
+  "updated_at": "2026-08-08T18:23:42.971495+00:00"
+}

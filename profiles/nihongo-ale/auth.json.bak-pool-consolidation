@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "providers": {},
+  "credential_pool": {
+    "copilot": [
+      {
+        "id": "90c25d",
+        "label": "GITHUB_TOKEN",
+        "auth_type": "api_key",
+        "priority": 47,
+        "source": "env:GITHUB_TOKEN",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://api.githubcopilot.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:b08bd27f0bc1f15c"
+      },
+      {
+        "id": "c8a7ce",
+        "label": "GH_TOKEN",
+        "auth_type": "api_key",
+        "priority": 49,
+        "source": "env:GH_TOKEN",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://api.githubcopilot.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:b08bd27f0bc1f15c"
+      },
+      {
+        "id": "f223ca",
+        "label": "gh auth token",
+        "auth_type": "api_key",
+        "priority": 50,
+        "source": "gh_cli",
+        "last_status": "exhausted",
+        "last_status_at": 1784984418.9349074,
+        "last_error_code": 429,
+        "last_error_reason": null,
+        "last_error_message": "quota exceeded",
+        "last_error_reset_at": null,
+        "base_url": "https://api.githubcopilot.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:b08bd27f0bc1f15c"
+      }
+    ],
+    "anthropic": [
+      {
+        "id": "0371a7",
+        "label": "ANTHROPIC_API_KEY",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "env:ANTHROPIC_API_KEY",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://api.anthropic.com",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:bfffeafe31963ba4"
+      }
+    ],
+    "openai-api": [
+      {
+        "id": "cee92b",
+        "label": "OPENAI_API_KEY",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "env:OPENAI_API_KEY",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://api.openai.com/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:04e497e17c8f826f"
+      }
+    ],
+    "gemini": [
+      {
+        "id": "38332e",
+        "label": "GOOGLE_API_KEY",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "env:GOOGLE_API_KEY",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:f4a936c0b3e05874"
+      }
+    ],
+    "ollama-cloud": [
+      {
+        "id": "6d9770",
+        "label": "OLLAMA_API_KEY",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "env:OLLAMA_API_KEY",
+        "last_status": "ok",
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://ollama.com/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:bd82eb2dff10b11e"
+      },
+      {
+        "id": "bfe895",
+        "label": "OLLAMA_API_KEY_FALLBACK",
+        "auth_type": "api_key",
+        "priority": 1,
+        "source": "env:OLLAMA_API_KEY_FALLBACK",
+        "last_status": "ok",
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "https://ollama.com/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:22411d36447e7921"
+      }
+    ],
+    "custom:ollama-cloud-(via-proxy)": [
+      {
+        "id": "1872d6",
+        "label": "Ollama Cloud (via proxy)",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "config:Ollama Cloud (via proxy)",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "http://127.0.0.1:9099/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:bd82eb2dff10b11e"
+      }
+    ],
+    "custom:ollama-(default)": [
+      {
+        "id": "b0fdf8",
+        "label": "Ollama (default)",
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": "config:Ollama (default)",
+        "last_status": null,
+        "last_status_at": null,
+        "last_error_code": null,
+        "last_error_reason": null,
+        "last_error_message": null,
+        "last_error_reset_at": null,
+        "base_url": "http://127.0.0.1:11434/v1",
+        "request_count": 0,
+        "secret_fingerprint": "sha256:76e3c7bfe641ea12"
+      }
+    ]
+  },
+  "updated_at": "2026-08-08T02:00:30.509413+00:00"
+}
