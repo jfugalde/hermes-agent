@@ -2,78 +2,128 @@
 """Ollama Cloud credential pool reset.
 
 Clears stale 'exhausted' status from ollama-cloud pool entries in auth.json.
-Runs weekly after the Ollama quota resets (Sunday 6pm CST / Monday 00:00 UTC).
+Run weekly after the Ollama quota resets (Sunday 6pm CST / Monday 00:05 UTC)
+or on-demand when keys are genuinely exhausted but quota has reopened.
 
-Fixes ALL auth.json files: global + every profile, since each profile
-maintains its own credential pool state independently.
+Usage:
+  python3 ~/.hermes/scripts/ollama-pool-reset.py          # Reset all pools
+  python3 ~/.hermes/scripts/ollama-pool-reset.py ollama-cloud  # Reset specific provider
+  python3 ~/.hermes/scripts/ollama-pool-reset.py --status     # Show status only
 """
 
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
-PROVIDER = "ollama-cloud"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+AUTH_JSON = HERMES_HOME / "auth.json"
+
+STATUS_FIELDS = (
+    "last_status",
+    "last_status_at",
+    "last_error_code",
+    "last_error_reason",
+    "last_error_message",
+    "last_error_reset_at",
+)
 
 
-def reset_auth_json(path: Path) -> int:
-    """Reset exhausted ollama-cloud entries in a single auth.json. Returns count cleared."""
-    if not path.exists():
-        return 0
+def load_auth():
+    if not AUTH_JSON.exists():
+        print(f"Error: {AUTH_JSON} not found")
+        sys.exit(1)
+    with open(AUTH_JSON) as f:
+        return json.load(f)
 
-    with open(path) as f:
-        data = json.load(f)
 
-    pool = data.get("credential_pool", {}).get(PROVIDER, [])
+def save_auth(data):
+    with open(AUTH_JSON, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def show_status(data):
+    pool = data.get("credential_pool", {})
     if not pool:
-        return 0
+        print("No credential pools found")
+        return
 
-    cleared = 0
-    for entry in pool:
-        if entry.get("last_status") in ("exhausted", None) and entry.get("last_error_code"):
-            entry["last_status"] = "ok"
-            entry["last_status_at"] = None
-            entry["last_error_code"] = None
-            entry["last_error_reason"] = None
-            entry["last_error_message"] = None
-            entry["last_error_reset_at"] = None
-            entry["request_count"] = 0
-            cleared += 1
+    print(f"{'Provider':<35} {'Label':<30} {'Status':<12} {'Error':<8} {'Age'}")
+    print("-" * 100)
+    for provider, entries in sorted(pool.items()):
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            label = e.get("label", "?")[:29]
+            status = (e.get("last_status") or "ok")[:11]
+            error = str(e.get("last_error_code", ""))[:7]
+            ts = e.get("last_status_at")
+            if ts:
+                age = f"{time.time() - ts:.0f}s ago"
+            else:
+                age = "-"
+            print(f"{provider:<35} {label:<30} {status:<12} {error:<8} {age}")
 
-    if cleared > 0:
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
 
-    return cleared
+def reset_provider(data, provider_name):
+    pool = data.get("credential_pool", {})
+    if provider_name and provider_name != "all":
+        providers = {provider_name: pool.get(provider_name, [])}
+    else:
+        providers = pool
+
+    total_cleared = 0
+    for prov, entries in providers.items():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            if e.get("last_status") == "exhausted":
+                for field in STATUS_FIELDS:
+                    e[field] = None
+                e["request_count"] = 0
+                e["last_status"] = "ok"
+                total_cleared += 1
+                print(f"  Cleared: {prov}/{e.get('label', '?')}")
+
+    return total_cleared
 
 
 def main():
-    total = 0
+    args = sys.argv[1:]
+    show_only = "--status" in args
 
-    # 1. Global auth.json
-    global_auth = HERMES_HOME / "auth.json"
-    cleared = reset_auth_json(global_auth)
+    data = load_auth()
+
+    if show_only:
+        show_status(data)
+        return
+
+    provider = None
+    for arg in args:
+        if arg != "--status":
+            provider = arg
+            break
+
+    print("Before reset:")
+    show_status(data)
+    print()
+
+    cleared = reset_provider(data, provider)
+
     if cleared:
-        print(f"  Global: cleared {cleared} key(s)")
-    total += cleared
-
-    # 2. Every profile's auth.json
-    profiles_dir = HERMES_HOME / "profiles"
-    if profiles_dir.exists():
-        for profile_dir in sorted(profiles_dir.iterdir()):
-            if not profile_dir.is_dir():
-                continue
-            auth_path = profile_dir / "auth.json"
-            cleared = reset_auth_json(auth_path)
-            if cleared:
-                print(f"  {profile_dir.name}: cleared {cleared} key(s)")
-            total += cleared
-
-    if total == 0:
-        print("All ollama-cloud entries already ok — no changes needed")
+        save_auth(data)
+        print(f"\nCleared {cleared} exhausted entries")
+        # Re-load and show
+        data = load_auth()
+        print("\nAfter reset:")
+        show_status(data)
     else:
-        print(f"Reset {total} exhausted ollama-cloud credential(s) across all profiles")
+        print("\nNo exhausted entries to clear")
 
 
 if __name__ == "__main__":
