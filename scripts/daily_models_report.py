@@ -35,6 +35,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import hermes_pricing
 from response_cache import ttl_cached
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -798,7 +799,8 @@ def render_telegram_brief(
     spend_picks = spend_picks or {}
     ollama_live = budget.get("ollama_live", {})
     wk_frac  = ollama_live.get("weekly_usage_frac") if ollama_live.get("ok") else None
-    act_cost = ollama_live.get("activity_cost_usd", 0.0) if ollama_live.get("ok") else 0.0
+    act_cost = budget.get("ollama_total_usd", 0.0) or (
+        ollama_live.get("activity_cost_usd", 0.0) if ollama_live.get("ok") else 0.0)
     wk_rem   = budget.get("week_days_remaining", 7)
     credits_burned = budget.get("cop_credits_burned", 0.0)
     credits_proj   = budget.get("cop_credits_projected_eom", 0.0)
@@ -860,7 +862,7 @@ def render_telegram_brief(
         f"```",
         f"🐙 Copilot  {credits_burned:>5,.0f}/{credit_cap:,} cr  {cop_icon} EOM {proj_pct:.0f}%",
         f"🖱 Cursor   $200 flat + $400 key (pay-as-you-go)",
-        f"☁️  Ollama   {oll_pct_str} quota used  {oll_icon}  ${act_cost:.2f}/4wk",
+        f"☁️  Ollama   ${act_cost:.2f} budget  {oll_icon}  {oll_pct_str} quota",
         "```",
         "",
     ]
@@ -1785,6 +1787,10 @@ def analyze_budget(ollama_key: str) -> dict:
     if ollama_key:
         ollama_live = fetch_ollama_budget_data(ollama_key)
 
+    # Real dollar cost from activity cache
+    ollama_activity = hermes_pricing.read_cache().get("ollama_activity", {})
+    ollama_total_usd = sum(m.get("cost_usd", 0.0) for m in ollama_activity.values())
+
     return {
         "now": now,
         "month_elapsed_days": month_elapsed_days,
@@ -1795,6 +1801,8 @@ def analyze_budget(ollama_key: str) -> dict:
         "daily_rate": daily_rate,
         "projected_month": projected_month,
         "ollama_live": ollama_live,
+        "ollama_activity": ollama_activity,
+        "ollama_total_usd": ollama_total_usd,
         "cop_credits_burned": cop_credits_burned,
         "cop_credits_by_model": cop_credits_by_model,
         "cop_credit_daily_rate": cop_credit_daily_rate,
@@ -1935,7 +1943,7 @@ def render_budget_section(
     oll_daily_calls = oll_rate.get("calls", 0)
 
     lines.append(
-        f"### {oll_cfg['icon']} {oll_cfg['name']} — weekly request quota + activity cost")
+        f"### {oll_cfg['icon']} {oll_cfg['name']} — dollar budget")
     lines.append("")
 
     act_cost = 0.0
@@ -1946,6 +1954,23 @@ def render_budget_section(
         act_period = ollama_live.get("activity_period", "4-week")
         wk_models = ollama_live.get("weekly_models") or []
         act_models = ollama_live.get("activity_models") or []
+
+        # LEAD with the real dollar budget (from ollama_activity cache),
+        # not the weekly-% quota framing.
+        budget_usd = budget.get("ollama_total_usd", 0.0) or act_cost
+        lines.append(f"**Budget spent**: **${budget_usd:.2f}**")
+        # Top-by-cost from the real activity cache (model -> {cost_usd, reqs})
+        act_models = budget.get("ollama_activity") or {}
+        if act_models:
+            lines.append("Top by cost:")
+            for name, m in sorted(
+                    act_models.items(),
+                    key=lambda kv: kv[1].get("cost_usd", 0.0),
+                    reverse=True)[:5]:
+                lines.append(
+                    f"  • `{name}` — ${m.get('cost_usd', 0.0):.2f} "
+                    f"({m.get('reqs', 0)} reqs)")
+            lines.append("")
 
         if wk_frac is not None:
             pct = wk_frac * 100
@@ -1958,8 +1983,8 @@ def render_budget_section(
                           "overpacing" if delta > 10 else
                           "ahead" if delta > 0 else "on track")
             lines.append(
-                f"**Weekly quota**: {pct:.1f}% used, expected {expected:.1f}% "
-                f"— {pace_icon} **{pace_label}**")
+                f"_Weekly quota (secondary): {pct:.1f}% used, expected {expected:.1f}% "
+                f"— {pace_icon} **{pace_label}**_")
             lines.append(
                 f"~{wk_rem:.1f}d remaining in week, "
                 f"{(1 - wk_frac) * 100:.1f}% quota left")
@@ -1970,14 +1995,6 @@ def render_budget_section(
             lines.append(f"**Session quota**: {sess_frac * 100:.1f}% used (burst window)")
             lines.append("")
 
-        lines.append(
-            f"**Activity cost** ({act_period}): **${act_cost:.2f}**")
-        if act_models:
-            lines.append("Top by cost:")
-            for m in act_models[:5]:
-                cost_str = f"${float(m.get('cost', 0)):.2f}" if m.get("cost") else "—"
-                lines.append(
-                    f"• `{m['name']}` — {m.get('request_count', 0):,} reqs, {cost_str}")
         lines.append("")
 
         if wk_models:
@@ -2234,7 +2251,7 @@ def render_budget_section(
             unit = f"${cfg['monthly_usd'] / max(proj, 1) * 1000:.2f}"
         else:
             plan = "quota+cost"
-            unit = f"${act_cost:.2f} (4wk)" if ollama_live.get("ok") else "—"
+            unit = f"${budget.get('ollama_total_usd', 0.0) or act_cost:.2f} (4wk)" if ollama_live.get("ok") else "—"
         lines.append(
             f"| {cfg['icon']} {cfg['name']} | {plan}"
             f" | {calls:,} | {dr_calls:.0f}/d | {unit} |")
@@ -2792,7 +2809,8 @@ def render_budget_brief(budget: dict) -> list[str]:
     """Compact Telegram budget block — fits in ~10 lines."""
     ollama_live = budget.get("ollama_live", {})
     wk_frac = ollama_live.get("weekly_usage_frac") if ollama_live.get("ok") else None
-    act_cost = ollama_live.get("activity_cost_usd", 0.0) if ollama_live.get("ok") else 0.0
+    act_cost = budget.get("ollama_total_usd", 0.0) or (
+        ollama_live.get("activity_cost_usd", 0.0) if ollama_live.get("ok") else 0.0)
     credits_burned  = budget.get("cop_credits_burned", 0.0)
     credits_proj    = budget.get("cop_credits_projected_eom", 0.0)
     credit_cap      = 20000
@@ -2823,7 +2841,7 @@ def render_budget_brief(budget: dict) -> list[str]:
         "```",
         f"🐙 Copilot  {credits_burned:>6,.0f}/{credit_cap:,} cr  {cop_icon} proj {proj_pct:.0f}%",
         f"🖱 Cursor   $200 flat + $400 fallback key",
-        f"☁️  Ollama   {(wk_frac or 0)*100:.0f}% quota  {oll_icon}  ${act_cost:.2f} (4wk)",
+        f"☁️  Ollama   ${act_cost:.2f} budget  {oll_icon}  {(wk_frac or 0)*100:.0f}% quota",
         "```",
     ]
     return lines
