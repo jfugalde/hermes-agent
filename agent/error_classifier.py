@@ -233,6 +233,11 @@ _OVERLOADED_PATTERNS = [
 ]
 
 # Usage-limit patterns that need disambiguation (could be billing OR rate_limit)
+_HARD_QUOTA_WALL_PATTERNS = [
+    "usage limit",
+    "quota",
+]
+
 _USAGE_LIMIT_PATTERNS = [
     "usage limit",
     "quota",

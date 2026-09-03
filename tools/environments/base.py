@@ -1315,11 +1315,16 @@ class BaseEnvironment(ABC):
             except Exception:
                 pass  # cleanup is best-effort
             raise
+        finally:
+            # Drain thread now exits promptly after bash does (~300ms idle
+            # check).  A short join is enough; a long one would be a bug since
+            # it means the non-blocking loop itself stopped cooperating.
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
 
-        # Drain thread now exits promptly after bash does (~300ms idle
-        # check).  A short join is enough; a long one would be a bug since
-        # it means the non-blocking loop itself stopped cooperating.
-        drain_thread.join(timeout=2)
+            drain_thread.join(timeout=2)
 
         try:
             proc.stdout.close()

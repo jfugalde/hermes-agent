@@ -1747,7 +1747,7 @@ def _normalize_custom_provider_entry(
                 base_url = candidate
                 break
             parsed = urlparse(candidate)
-            if parsed.scheme and parsed.netloc:
+            if (parsed.scheme and parsed.netloc) or parsed.scheme in ('cursor', 'moa'):
                 base_url = candidate
                 break
             else:

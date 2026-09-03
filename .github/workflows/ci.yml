@@ -1,0 +1,67 @@
+name: CI
+
+# Minimal CI for this personal fork. The upstream orchestrator (detect ->
+# tests x8, lint, js, e2e-desktop, docs, docker, supply-chain, osv, review
+# labels, timings) is overkill here: no branch protection, no external
+# consumers, single maintainer. We keep ONE lightweight job that fails fast
+# on syntax errors across Python and JS, so a bad merge can't land silently.
+#
+# This is intentionally narrow. If a real test/lint need emerges, add a
+# focused job — do not restore the full orchestrator.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax-check:
+    name: Syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Compile all Python sources
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r f; do
+            if ! python3 -m py_compile "$f"; then
+              echo "::error file=$f::Python syntax error"
+              failed=1
+            fi
+          done < <(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.venv/*' \
+            -not -path '*/node_modules/*' -not -path '*/\.git/*' | sort)
+          exit "$failed"
+
+      - name: Check YAML workflow syntax
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML not installed — skipping YAML parse check")
+              sys.exit(0)
+          bad = []
+          for f in glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"):
+              try:
+                  with open(f) as fh:
+                      yaml.safe_load(fh)
+              except Exception as e:
+                  bad.append((f, str(e)))
+          if bad:
+              for f, e in bad:
+                  print(f"ERROR {f}: {e}", file=sys.stderr)
+              sys.exit(1)
+          print(f"OK: parsed {len(glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'))} workflow files")
+          PY
