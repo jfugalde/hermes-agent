@@ -4404,7 +4404,7 @@ def save_config(
         sec = normalized.get("security", {})
         if not sec or sec.get("redact_secrets") is None:
             parts.append(_SECURITY_COMMENT)
-        fb = normalized.get("fallback_model", {})
+        fb = normalized.get("fallback_providers", [])
         fb_is_valid = False
         if isinstance(fb, list):
             fb_is_valid = any(isinstance(e, dict) and e.get("provider") and e.get("model") for e in fb)
