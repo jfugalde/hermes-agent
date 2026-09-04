@@ -65,7 +65,7 @@ def handle(event_type: str, context: dict) -> dict | None:
     # ------------------------------------------------------------------
     try:
         config_path = get_hermes_home() / "config.yaml"
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
 
         sc_config = config.get("semantic_cache", {})
