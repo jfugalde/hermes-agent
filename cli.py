@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 import logging
 import copy
 import os
+import subprocess
 import shutil
 import sys
 import json
@@ -9862,8 +9863,62 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             f"Tokens: {total_tokens:,}",
             f"Agent Running: {'Yes' if is_running else 'No'}",
         ])
+        extra = []
+        budget_line = self._ollama_budget_status()
+        if budget_line:
+            extra.append(budget_line)
+        for repo in ("infrastructure", ".hermes"):
+            line = self._git_repo_status(repo)
+            if line:
+                extra.append(line)
+        if extra:
+            lines.append("")
+            lines.extend(extra)
         self._console_print("\n".join(lines), highlight=False, markup=False)
-    
+
+    def _ollama_budget_status(self, budget=10.0):
+        """Render the Ollama Cloud budget spend bar (mirrors the TUI status widget)."""
+        try:
+            cache_path = Path(display_hermes_home()) / "cache" / "ollama-pricing.json"
+            if not cache_path.exists():
+                return None
+            data = json.loads(cache_path.read_text())
+            activity = data.get("ollama_activity") or {}
+            if isinstance(activity, dict):
+                spent = sum(float(v.get("cost_usd", 0) or 0) for v in activity.values())
+            else:
+                spent = sum(float(a.get("cost_usd", 0) or 0) for a in activity)
+        except Exception:
+            return None
+        pct = (spent / budget * 100) if budget > 0 else 0
+        filled = int(round(pct / 10))
+        bar = "█" * filled + "░" * (10 - filled)
+        if pct >= 100:
+            label = f"OVER ${spent:.2f}"
+        else:
+            label = f"${spent:.2f} / ${budget:.2f} [{bar}] {pct:.0f}%"
+        return f"☁️ Ollama: {label}"
+
+    def _git_repo_status(self, repo):
+        """Render branch + dirty-file count for a repo (mirrors the TUI status widget)."""
+        try:
+            root = Path.home() / repo
+            if not root.is_dir():
+                return None
+            branch = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip() or "HEAD"
+            dirty = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            n = len([l for l in dirty.splitlines() if l.strip()])
+            mark = f"●{n}" if n else "✓"
+            return f"  ~/{repo} [{branch}] {mark}"
+        except Exception:
+            return None
+
     def _fast_command_available(self) -> bool:
         try:
             from hermes_cli.models import model_supports_fast_mode
