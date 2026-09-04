@@ -41,7 +41,7 @@ def _read_chain(config: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _write_chain(config: Dict[str, Any], chain: List[Dict[str, Any]]) -> None:
     """Persist the chain to ``fallback_providers`` and clear legacy key."""
-    config["fallback_providers"] = chain
+    config["fallback_providers"] = copy.deepcopy(chain)
     # Drop the legacy single-dict key on write so there's only one source of truth.
     if "fallback_model" in config:
         config.pop("fallback_model", None)
