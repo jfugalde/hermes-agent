@@ -40,7 +40,7 @@ def _load_config() -> Dict[str, Any]:
     if not config_path.exists():
         return {}
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f) if yaml else {}
         return config.get("semantic_cache", {}) or {}
     except Exception:

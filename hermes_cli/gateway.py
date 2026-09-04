@@ -4380,6 +4380,19 @@ def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
     if not unit_path.exists():
         return False
 
+    # ── Custom wrapper guard (homelab) ────────────────────────────────
+    # This homelab launches gateways via wrapper scripts
+    # (infrastructure/scripts/*-gateway-run.sh) that inject Telegram tokens
+    # from 1Password. Native refresh would rewrite these to bare python and
+    # drop Telegram on the next restart. Skip refresh when the installed
+    # unit's ExecStart points at a wrapper script.
+    try:
+        installed_text = unit_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if "gateway-run.sh" in installed_text:
+        return False
+
     # The gate below funnels through ``systemd_unit_is_current``, which is the
     # single HERMES_HOME-sync chokepoint (adopts the unit's pinned home before
     # any compare/regenerate). No separate pre-sync needed here — and the env

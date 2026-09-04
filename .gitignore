@@ -220,3 +220,110 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime state + secrets — NEVER commit. This checkout doubles as the live
+# ~/.hermes runtime home, so it accumulates session DBs, caches, tokens, and
+# 1Password/Google secrets that must never reach the (public) repo.
+# ─────────────────────────────────────────────────────────────────────────────
+# Session / state databases
+/state.db
+/state.db-wal
+/state.db-shm
+/state/
+/sessions/
+/response_store.db
+/response_store.db-wal
+/response_store.db-shm
+/session_model_usage.db
+/projects.db
+/ollama_usage.db
+/kanban.db
+/kanban.db-wal
+/kanban.db-shm
+/kanban.db.dispatch.lock
+/kanban.db.init.lock
+/verification_evidence.db
+/kanban/
+/checkpoints/
+/spawn-trees/
+/terminal-sessions/
+/pastes/
+/pairing/
+/a2a_conversations/
+/a2a_audit.jsonl
+/feishu_seen_message_ids.json
+/webhook_subscriptions.json
+/processes.json
+/gateway.lock
+/gateway.pid
+/gateway_state.json
+/gateway-starts.log
+/gateway/
+/restart_loop.json
+/.gateway_state_*.tmp
+/.restart_last_processed.json
+/.scratch_tip_shown
+/.update_check
+/.skip_upstream_prompt
+/.skills_prompt_snapshot.json
+/.hermes_history
+/install_id
+/interrupt_debug.log
+/pr-merge-poller.last
+/context_length_cache.yaml
+/tui-theme-boot.json
+/web-ui-build-stamp.json
+/spec-variant-editor-options-system.md
+/channel_directory.json
+/.mcp-discovery.lock
+/.npm_lock_hash_*
+/.models_dev_cache_*.tmp
+/models_dev_cache.json
+/models_dev_cache.etag
+/ollama_cloud_models_cache.json
+/provider_models_cache.json
+/.card-monitor-*.json
+
+# Secrets / credentials
+/.env
+/.env.*
+/auth.json
+/auth.json.bak-*
+/auth.lock
+/bridge-config.yaml
+/bridge-state.json
+/bridge-state.json.bak.*
+/google_client_secret.json
+/google_token.json
+/mcp-tokens/
+/op.env
+/op.env.bak-*
+
+# Caches / backups / media / scratch
+/cache/
+/backups/
+/.archive/
+/.bak-archive/
+/.curator_backups/
+/disk-cleanup/
+/files/
+/lsp/
+/mcp-servers/
+/shopify-mcp/
+/clawmem-transcripts/
+/memories/
+/bin/
+/*.mp3
+/*.bak-*
+/config.yaml.bak-*
+/config.yaml.corrupt.*.bak
+/scripts/*.bak-*
+/scripts/*.bak
+/cron/.fire-*.lock
+/cron/*.lock
+/hermes-agent/
+
+# Per-profile runtime homes (gateway.lock, state.db*, .env, op_cache.json,
+# config.yaml.bak, logs/, cache/) — live runtime state, never repo content.
+/profiles/
