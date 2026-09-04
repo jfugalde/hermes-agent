@@ -24,7 +24,7 @@ def _identity(entry: Dict[str, Any]):
 
 def _write_chain(config: Dict[str, Any], chain: List[Dict[str, Any]]) -> None:
     """Persist the chain to ``fallback_providers``; drop the legacy key so there is one source of truth."""
-    config["fallback_providers"] = chain
+    config["fallback_providers"] = copy.deepcopy(chain)
     config.pop("fallback_model", None)
 
 
