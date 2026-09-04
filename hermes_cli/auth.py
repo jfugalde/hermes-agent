@@ -313,7 +313,8 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
     cleaned = value.strip()
     return (len(cleaned) >= min_length
             and cleaned.lower() not in _PLACEHOLDER_SECRET_VALUES
-            and not _is_placeholder_shape(cleaned))
+            and not _is_placeholder_shape(cleaned)
+            and not cleaned.startswith("op://"))
 
 
 # Known API-key prefixes per provider. Only listed providers get prefix validation; everyone else
