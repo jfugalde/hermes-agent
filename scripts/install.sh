@@ -1485,7 +1485,7 @@ clone_repo() {
     fi
 
     if [ -d "$INSTALL_DIR" ]; then
-        if [ -d "$INSTALL_DIR/.git" ]; then
+        if [ -d "$INSTALL_DIR/.git" ] && git -C "$INSTALL_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             log_info "Existing installation found, updating..."
             cd "$INSTALL_DIR"
 
