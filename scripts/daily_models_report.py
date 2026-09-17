@@ -104,11 +104,34 @@ def get_gh_token() -> str:
     return ""
 
 
-def get_ollama_api_key() -> str:
-    key = (os.environ.get("OLLAMA_API_KEY") or "").strip()
-    if key:
-        return key
-    return load_dotenv_keys("OLLAMA_API_KEY").get("OLLAMA_API_KEY", "")
+def get_ollama_api_keys() -> list[str]:
+    """Return all non-empty Ollama Cloud API keys from env / dotenv."""
+    keys: list[str] = []
+    env_path = HERMES_HOME / ".env.op"
+    env_text = ""
+    if env_path.is_file():
+        try:
+            env_text = env_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    for name in ("OLLAMA_API_KEY", "OLLAMA_API_KEY_FALLBACK"):
+        k = os.environ.get(name, "").strip()
+        if not k:
+            for line in env_text.splitlines():
+                line = line.strip()
+                if line.startswith(name) and "=" in line:
+                    v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if v:
+                        k = v
+                        break
+        if not k:
+            try:
+                k = load_dotenv_keys(name).get(name, "")
+            except Exception:
+                k = ""
+        if k and k not in keys:
+            keys.append(k)
+    return keys
 
 
 def http_json(url: str, headers: dict | None = None, data: bytes | None = None, timeout: int = 20):
@@ -802,10 +825,9 @@ def render_telegram_brief(
     act_cost = budget.get("ollama_total_usd", 0.0) or (
         ollama_live.get("activity_cost_usd", 0.0) if ollama_live.get("ok") else 0.0)
     wk_rem   = budget.get("week_days_remaining", 7)
-    credits_burned = budget.get("cop_credits_burned", 0.0)
-    credits_proj   = budget.get("cop_credits_projected_eom", 0.0)
-    credit_cap     = 20000
-    proj_pct       = credits_proj / credit_cap * 100 if credit_cap else 0
+    # ── Provider budget state (Copilot removed 2026-08) ─────────────────────
+    cur_flat_usd = 200.0  # Cursor Business flat plan
+    oll_keys_count = len(budget.get('ollama_keys', [])) if isinstance(budget.get('ollama_keys'), list) else 1
 
     # ── Routing mode ──────────────────────────────────────────────────────────
     if wk_frac is not None and wk_frac > 0.90:
@@ -834,7 +856,6 @@ def render_telegram_brief(
         light_cfg = ("ollama-cloud", "gpt-oss:20b")
 
     # ── Budget status icons ───────────────────────────────────────────────────
-    cop_icon = "🔴" if proj_pct > 95 else ("🟡" if proj_pct > 80 else "🟢")
     oll_icon = "🔴" if (wk_frac or 0) > 0.90 else ("🟠" if (wk_frac or 0) > 0.70 else "🟢")
 
     # ── Best model pick from spend data ──────────────────────────────────────
@@ -860,8 +881,8 @@ def render_telegram_brief(
     lines += [
         "**Budget**",
         f"```",
-        f"🐙 Copilot  {credits_burned:>5,.0f}/{credit_cap:,} cr  {cop_icon} EOM {proj_pct:.0f}%",
-        f"🖱 Cursor   $200 flat + $400 key (pay-as-you-go)",
+        f"🐙 Copilot  $200/mo budget",
+        f"🖱 Cursor   $200 flat (fallback key pay-as-you-go)",
         f"☁️  Ollama   ${act_cost:.2f} budget  {oll_icon}  {oll_pct_str} quota",
         "```",
         "",
@@ -884,7 +905,6 @@ def render_telegram_brief(
     ]
 
     # 4. Top waste signal (if any)
-    cop_30d_cr = budget.get("cop_credits_burned", 0) * 100   # rough 30d from MTD
     # Check for cursor:auto in profiles
     auto_profiles = [p["profile"] for p in profiles
                      if (p.get("main") or "") in ("auto", "default")
@@ -895,9 +915,9 @@ def render_telegram_brief(
             "_Auto picks $5–10/M models silently — pin explicit model above._",
             "",
         ]
-    elif proj_pct > 95:
+    elif (wk_frac or 0) > 0.95:
         lines += [
-            f"⚠️ **Copilot credits projecting {proj_pct:.0f}% EOM** — shift heavy to Cursor flat",
+            f"⚠️ **Ollama weekly quota {oll_pct_str}** — shift heavy to Cursor flat",
             "",
         ]
 
@@ -923,9 +943,7 @@ def render_telegram_brief(
         cur_t = prov_totals.get("cursor", {})
         oll_t = prov_totals.get("ollama-cloud", {})
         rundown: list[str] = []
-        if cop_t.get("cost_usd", 0) > 0:
-            rundown.append(
-                f"🐙 Copilot ${cop_t['cost_usd']:.2f} · {_fmt_int(cop_t.get('calls',0))} calls")
+        # Copilot removed 2026-08; no spend tracked here
         if cur_t.get("calls", 0) > 0:
             rundown.append(
                 f"🖱 Cursor {_fmt_int(cur_t.get('calls',0))} calls (flat)")
@@ -1538,74 +1556,34 @@ BUDGET_CONFIG = {
         "name": "GitHub Copilot",
         "icon": "🐙",
         "type": "monthly_flat",
-        "monthly_usd": 100.0,     # Copilot Max ($100/mo)
-        # Credit system: 1 AI credit = $0.01 USD  →  token-based per-model pricing
-        # Copilot Max: 20,000 included AI credits/mo (base 10K + flex 10K)
-        # User spending cap set to 20K credits = $200 total (plan + overage hard cap).
-        "included_credits": 20_000,   # credits bundled in plan
-        "credit_cap": 20_000,         # hard spending cap (user's GH budget setting)
-        "credit_cap_usd": 200.0,      # = credit_cap × $0.01
-        "credit_usd_rate": 0.01,      # 1 AI credit = $0.01 USD (fixed by GH)
-        # Per-model token pricing ($/M tokens) from:
-        # https://docs.github.com/en/copilot/reference/ai-models/models-and-pricing-for-github-copilot
-        "model_pricing": {
-            # model_id: (in_per_mtok, out_per_mtok)  — used to compute credit burn
-            "claude-haiku-4.5":          (1.00,   5.00),
-            "claude-sonnet-4":           (3.00,  15.00),
-            "claude-sonnet-4.5":         (3.00,  15.00),
-            "claude-sonnet-4.6":         (3.00,  15.00),
-            "claude-sonnet-5":           (2.00,  10.00),  # promo until 2026-08-31
-            "claude-opus-4.5":           (5.00,  25.00),
-            "claude-opus-4.6":           (5.00,  25.00),
-            "claude-opus-4.7":           (5.00,  25.00),
-            "claude-opus-4.8":           (5.00,  25.00),
-            "claude-opus-4.8-fast-mode": (10.00, 50.00),
-            "claude-opus-5":             (5.00,  25.00),
-            "claude-fable-5":            (10.00, 50.00),
-            "gpt-5-mini":                (0.25,   2.00),
-            "gpt-5.3-codex":             (1.75,  14.00),
-            "gpt-5.4":                   (2.50,  15.00),
-            "gpt-5.4-mini":              (0.75,   4.50),
-            "gpt-5.4-nano":              (0.20,   1.25),
-            "gpt-5.5":                   (5.00,  30.00),
-            "gpt-5.6-luna":              (0.20,   1.20),
-            "gpt-5.6-sol":               (5.00,  30.00),
-            "gpt-5.6-terra":             (2.00,  12.00),
-            "gemini-3.1-pro":            (2.00,  12.00),
-            "gemini-3.5-flash":          (1.50,   9.00),
-            "gemini-3.6-flash":          (1.50,   7.50),
-            "grok-4.5":                  (2.00,   6.00),
-            "kimi-k2.7-code":            (0.95,   4.00),
-            "mai-code-1-flash":          (0.75,   4.50),
-            "raptor-mini":               (0.25,   2.00),
-            "qwen2.5":                   (0.50,   2.00),
-        },
+        "monthly_usd": 200.0,     # Copilot plan / team budget cap ($200/mo)
         "note": (
-            "Copilot Max $100/mo → 20K AI credits included. "
-            "1 credit = $0.01 USD. Hard cap: $200/mo (20K credits). "
-            "Credit burn computed from MTD token counts × per-model rate."
+            "GitHub Copilot — flat $200/mo budget envelope. "
+            "Usage is not metered via an API key; cost is tracked via GitHub billing."
         ),
     },
     "cursor": {
         "name": "Cursor Agent",
         "icon": "🖱",
         "type": "monthly_flat",
-        "monthly_usd": 200.0,     # Business/Max plan ($200/mo) — flat, no per-token metering
-        # Fallback API key provisioned separately: additional ~$400/mo budget
-        # (pay-as-you-go via OpenRouter or direct provider key wired into Cursor)
-        "fallback_budget_usd": 400.0,
-        "total_budget_usd": 600.0,  # flat $200 + fallback $400
+        "monthly_usd": 200.0,     # Cursor Business plan ($200/mo) — flat, no per-token metering
+        # Fallback API key is pay-as-you-go; its cost is tracked via cursor-go-adapter :9101
         "note": (
             "Cursor flat $200/mo (Business). "
-            "Fallback API key adds ~$400/mo pay-as-you-go. "
-            "Total budget: $600/mo. Per-token cost only hits fallback key."
+            "Fallback API key spend is tracked via cursor-go-adapter usage."
         ),
     },
     "ollama-cloud": {
         "name": "Ollama Cloud",
         "icon": "☁️",
-        "type": "weekly_quota_plus_usd",
-        "note": "Weekly request quota (L1–L4 GPU-time buckets) + activity cost",
+        "type": "multi_account_quota_plus_usd",
+        "note": "Two accounts: primary (monthly rolling) + fallback ($300 credit). Weekly/session quota + real activity cost.",
+    },
+    "perplexity": {
+        "name": "Perplexity",
+        "icon": "🔍",
+        "type": "pay_as_you_go",
+        "note": "Reserved for search/research tasks; not a default chat provider.",
     },
 }
 
@@ -1615,6 +1593,7 @@ PROVIDER_BUDGET_MAP = {
     "github-copilot": "copilot",
     "cursor": "cursor",
     "ollama-cloud": "ollama-cloud",
+    "perplexity": "perplexity",
 }
 
 
@@ -1720,7 +1699,38 @@ def _fmt_mtok(n: int) -> str:
     return str(n)
 
 
-def analyze_budget(ollama_key: str) -> dict:
+def _merge_ollama_live(per_key_data: list[dict]) -> dict:
+    """Merge /api/usage responses from multiple Ollama Cloud keys.
+
+    - weekly quota fraction = MAX across accounts (binding constraint)
+    - session quota = MAX across accounts
+    - activity cost = SUM across accounts
+    - weekly model request counts = SUM across accounts
+    """
+    if not per_key_data:
+        return {"ok": False, "reason": "no keys"}
+    ok_results = [d for d in per_key_data if d.get("ok")]
+    if not ok_results:
+        return per_key_data[0] if per_key_data else {"ok": False, "reason": "all fetches failed"}
+
+    merged: dict = {"ok": True}
+    weekly_fracs = [d["weekly_usage_frac"] for d in ok_results if d.get("weekly_usage_frac") is not None]
+    merged["weekly_usage_frac"] = max(weekly_fracs) if weekly_fracs else None
+    session_fracs = [d["session_usage_frac"] for d in ok_results if d.get("session_usage_frac") is not None]
+    merged["session_usage_frac"] = max(session_fracs) if session_fracs else None
+    merged["activity_cost_usd"] = sum(d.get("activity_cost_usd", 0.0) for d in ok_results)
+
+    models_by_name: dict[str, int] = {}
+    for d in ok_results:
+        for m in d.get("weekly_models", []):
+            name = m.get("name")
+            if name:
+                models_by_name[name] = models_by_name.get(name, 0) + m.get("request_count", 0)
+    merged["weekly_models"] = [{"name": k, "request_count": v} for k, v in models_by_name.items()]
+    return merged
+
+
+def analyze_budget(ollama_keys: list[str]) -> dict:
     """Pull all data needed for the budget optimizer section."""
     now = datetime.now()
     month_start_ts = datetime(now.year, now.month, 1).timestamp()
@@ -1748,46 +1758,10 @@ def analyze_budget(ollama_key: str) -> dict:
         for bkey, d in last30.items()
     }
 
-    # ── Copilot credit burn estimate ─────────────────────────────────────────
-    # Compute credits burned from MTD token counts × per-model pricing.
-    # 1 AI credit = $0.01 USD.  cost_usd = in_tok/1M × in_rate + out_tok/1M × out_rate
-    # credits_burned = cost_usd / 0.01
-    cop_cfg = BUDGET_CONFIG["copilot"]
-    cop_model_pricing = cop_cfg.get("model_pricing", {})
-    cop_credit_rate = cop_cfg.get("credit_usd_rate", 0.01)
-    cop_mtd = mtd.get("copilot", {})
-    cop_credits_burned: float = 0.0
-    cop_credits_by_model: dict[str, float] = {}
-    for mid, mdata in cop_mtd.get("models", {}).items():
-        itok = mdata.get("in_tok", 0)
-        otok = mdata.get("out_tok", 0)
-        # Normalise: strip version suffix noise (e.g. "claude-opus-4.8" OK)
-        rates = cop_model_pricing.get(mid)
-        if rates is None:
-            # fuzzy: try lower-cased and strip trailing version suffixes
-            for k in cop_model_pricing:
-                if mid.startswith(k) or k.startswith(mid):
-                    rates = cop_model_pricing[k]
-                    break
-        if rates:
-            in_rate, out_rate = rates
-        else:
-            # Unknown model — use mid-range Sonnet pricing as conservative estimate
-            in_rate, out_rate = 3.00, 15.00
-        cost_usd = (itok / 1_000_000 * in_rate) + (otok / 1_000_000 * out_rate)
-        credits = cost_usd / cop_credit_rate
-        cop_credits_burned += credits
-        cop_credits_by_model[mid] = credits
+    per_key_data = [fetch_ollama_budget_data(k) for k in ollama_keys]
+    ollama_live = _merge_ollama_live(per_key_data)
 
-    # Project EOM credits based on MTD burn rate
-    cop_credit_daily_rate = cop_credits_burned / max(month_elapsed_days, 1)
-    cop_credits_projected_eom = cop_credit_daily_rate * 30
-
-    ollama_live: dict = {}
-    if ollama_key:
-        ollama_live = fetch_ollama_budget_data(ollama_key)
-
-    # Real dollar cost from activity cache
+    # Real dollar cost from activity cache (multi-key merged by hermes_pricing)
     ollama_activity = hermes_pricing.read_cache().get("ollama_activity", {})
     ollama_total_usd = sum(m.get("cost_usd", 0.0) for m in ollama_activity.values())
 
@@ -1803,10 +1777,8 @@ def analyze_budget(ollama_key: str) -> dict:
         "ollama_live": ollama_live,
         "ollama_activity": ollama_activity,
         "ollama_total_usd": ollama_total_usd,
-        "cop_credits_burned": cop_credits_burned,
-        "cop_credits_by_model": cop_credits_by_model,
-        "cop_credit_daily_rate": cop_credit_daily_rate,
-        "cop_credits_projected_eom": cop_credits_projected_eom,
+        "ollama_keys": ollama_keys,
+        "ollama_per_key": per_key_data,
     }
 
 
@@ -1834,70 +1806,42 @@ def render_budget_section(
         "",
     ]
 
+    # ── Perplexity (pay-as-you-go research) ──────────────────────────────────
+    plex_cfg = BUDGET_CONFIG.get("perplexity", {})
+    plex_data = mtd.get("perplexity", {})
+    if plex_data.get("calls", 0) > 0:
+        lines += [
+            f"### {plex_cfg.get('icon', '🔍')} {plex_cfg.get('name', 'Perplexity')} — research-only",
+            "",
+            f"• {plex_data.get('calls', 0):,} calls MTD — no cap configured; track via provider dashboard.",
+            "",
+        ]
+
     # ── GitHub Copilot ───────────────────────────────────────────────────────
     cop_cfg = BUDGET_CONFIG["copilot"]
     cop_data = mtd.get("copilot", {})
-    cop_rate = daily_rate.get("copilot", {})
-    cop_proj = projected.get("copilot", 0)
     cop_mtd_calls = cop_data.get("calls", 0)
     cop_mtd_intok = cop_data.get("in_tok", 0)
-    cop_mtd_cache = cop_data.get("cache_read", 0)
-    cop_daily_calls = cop_rate.get("calls", 0)
-    cop_cache_denom = cop_mtd_intok + cop_mtd_cache
-    cop_cache_eff = (cop_mtd_cache / cop_cache_denom * 100) if cop_cache_denom else 0.0
-
-    # Credit gauge
-    credit_cap = cop_cfg["credit_cap"]           # 20,000
-    included = cop_cfg["included_credits"]        # 20,000
-    credits_burned = budget.get("cop_credits_burned", 0.0)
-    credits_proj_eom = budget.get("cop_credits_projected_eom", 0.0)
-    credit_pct = credits_burned / credit_cap * 100 if credit_cap else 0
-    proj_pct = credits_proj_eom / credit_cap * 100 if credit_cap else 0
-    cost_usd_burned = credits_burned * cop_cfg["credit_usd_rate"]
-    cost_usd_proj = credits_proj_eom * cop_cfg["credit_usd_rate"]
-    overage_proj = max(credits_proj_eom - included, 0)
-    overage_usd = overage_proj * cop_cfg["credit_usd_rate"]
-
-    if proj_pct >= 95:
-        credit_alert = f"🔴 CREDIT ALERT: projected {proj_pct:.1f}% EOM ({credit_pct:.1f}% used MTD)"
-    elif proj_pct >= 80 or credit_pct >= 70:
-        credit_alert = f"🟡 Credit watch: projected {proj_pct:.1f}% EOM ({credit_pct:.1f}% used MTD)"
-    else:
-        credit_alert = f"🟢 Credit healthy: {credit_pct:.1f}% MTD — projected {proj_pct:.1f}% EOM"
-
     lines += [
-        f"### {cop_cfg['icon']} {cop_cfg['name']} — ${cop_cfg['monthly_usd']:.0f}/mo (Copilot Max)",
+        f"### {cop_cfg['icon']} {cop_cfg['name']} — ${cop_cfg['monthly_usd']:.0f}/mo budget",
         "",
-        credit_alert,
+        f"Copilot runs on the team/org budget envelope of **${cop_cfg['monthly_usd']:.0f}/mo**. "
+        "No per-token metering via API key — track usage through GitHub billing.",
         "",
-        "| Metric | MTD | Projected EOM |",
-        "|--------|-----|---------------|",
-        (f"| AI credits burned | {credits_burned:,.0f} / {credit_cap:,} "
-         f"({credit_pct:.1f}%) | {credits_proj_eom:,.0f} ({proj_pct:.1f}%) |"),
-        (f"| Est. cost (tokens) | ${cost_usd_burned:.2f} | ${cost_usd_proj:.2f} |"),
-        (f"| Overage (above {included:,} incl.) | — | "
-         f"{overage_proj:,.0f} credits (${overage_usd:.2f}) |"),
-        (f"| API calls | {cop_mtd_calls:,} | {cop_proj:,} |"),
-        (f"| Input tokens | {_fmt_mtok(cop_mtd_intok)} | — |"),
-        (f"| Cache efficiency | {cop_cache_eff:.1f}% | — |"),
+        "| Metric | MTD |",
+        "|--------|-----|",
+        f"| API calls (telemetry) | {cop_mtd_calls:,} |",
+        f"| Input tokens | {_fmt_mtok(cop_mtd_intok)} |",
         "",
     ]
-    # Top models by credit burn
-    cop_credits_by_model = budget.get("cop_credits_by_model", {})
-    if cop_credits_by_model:
-        lines.append("**Top models by credit burn (MTD)**")
-        for mid, cr in sorted(cop_credits_by_model.items(), key=lambda x: -x[1])[:5]:
-            md = cop_data.get("models", {}).get(mid, {})
-            lines.append(
-                f"• `{mid}` — {cr:,.0f} credits (${cr * 0.01:.2f})"
-                f", {md.get('calls', 0):,} calls"
-            )
+    cop_models = sorted(
+        cop_data.get("models", {}).items(), key=lambda x: -x[1]["calls"])
+    if cop_models:
+        lines.append("**Top models MTD**")
+        for mid, md in cop_models[:5]:
+            lines.append(f"• `{mid}` — {md['calls']:,} calls, {_fmt_mtok(md['in_tok'])} in")
         lines.append("")
-    lines.append(
-        f"_1 AI credit = $0.01. Plan includes {included:,} credits/mo. "
-        f"Hard cap {credit_cap:,} credits (${credit_cap * 0.01:.0f}). "
-        "Cache reuse amortizes long sessions — good for: apollo, reviewer, orchestrator._"
-    )
+    lines.append("_Use Copilot for coding sessions and cache-heavy reviews; no API key needed._")
     lines.append("")
 
     # ── Cursor ───────────────────────────────────────────────────────────────
@@ -1918,7 +1862,7 @@ def render_budget_section(
          f" | {cur_proj:,} |"),
         (f"| Input tokens | {_fmt_mtok(cur_mtd_intok)}"
          f" | {_fmt_mtok(int(cur_rate.get('in_tok', 0)))} | — |"),
-        "| Cache hit tokens | — | — | — |",
+        "| Fallback-key spend | tracked externally | — | — |",
         "",
     ]
     cur_models = sorted(
@@ -1928,14 +1872,17 @@ def render_budget_section(
         for mid, md in cur_models[:5]:
             lines.append(f"• `{mid}` — {md['calls']:,} calls, {_fmt_mtok(md['in_tok'])} in")
         lines.append("")
-    cur_unit = cur_cfg["monthly_usd"] / max(cur_proj, 1) * 1000
+    if cur_mtd_calls > 0:
+        cur_unit = cur_cfg["monthly_usd"] / cur_mtd_calls * 1000
+        cur_unit_str = f"${cur_unit:.2f}/1K calls at current volume"
+    else:
+        cur_unit_str = "flat plan — no MTD usage"
     lines.append(
-        f"_${cur_unit:.2f}/1K calls at current volume. "
-        "Projected EOM based on 30d avg (not MTD pace — too early in month). "
-        "model=auto picks dynamically — good for: delegation, coding agents, worktrees._")
+        f"_{cur_unit_str}. Fallback API key is pay-as-you-go and tracked via cursor-go-adapter usage. "
+        "model=auto picks dynamically — good for: delegation, coding agents, worktrees.")
     lines.append("")
 
-    # ── Ollama Cloud ─────────────────────────────────────────────────────────
+   # ── Ollama Cloud ─────────────────────────────────────────────────────────
     oll_cfg = BUDGET_CONFIG["ollama-cloud"]
     oll_data = mtd.get("ollama-cloud", {})
     oll_rate = daily_rate.get("ollama-cloud", {})
@@ -1959,6 +1906,26 @@ def render_budget_section(
         # not the weekly-% quota framing.
         budget_usd = budget.get("ollama_total_usd", 0.0) or act_cost
         lines.append(f"**Budget spent**: **${budget_usd:.2f}**")
+
+        # Per-account breakdown
+        per_key = budget.get("ollama_per_key") or []
+        if per_key:
+            lines.append("")
+            lines.append("| Account | Weekly quota | Session quota | 4-week cost |")
+            lines.append("|---------|--------------|---------------|-------------|")
+            for idx, kd in enumerate(per_key, 1):
+                if not kd.get("ok"):
+                    lines.append(f"| Key #{idx} | unavailable | — | — |")
+                    continue
+                wk = kd.get("weekly_usage_frac")
+                ss = kd.get("session_usage_frac")
+                ac = kd.get("activity_cost_usd", 0.0)
+                wk_str = f"{wk*100:.1f}%" if wk is not None else "—"
+                ss_str = f"{ss*100:.1f}%" if ss is not None else "—"
+                label = "Primary" if idx == 1 else "Fallback"
+                lines.append(f"| {label} | {wk_str} | {ss_str} | ${ac:.2f} |")
+            lines.append("")
+
         # Top-by-cost from the real activity cache (model -> {cost_usd, reqs})
         act_models = budget.get("ollama_activity") or {}
         if act_models:
@@ -2024,6 +1991,17 @@ def render_budget_section(
             lines.append(f"• `{mid}` — {md['calls']:,} calls, {_fmt_mtok(md['in_tok'])} in")
         lines.append("")
 
+    # ── Other providers ───────────────────────────────────────────────────────
+    lines.append("### 🔌 Other providers")
+    lines.append("")
+    other: list[str] = []
+    # Perplexity key is in 1Password but not wired to .env.op
+    other.append("• **Perplexity**: key exists in 1Password; not injected into `.env.op`. Research tier only.")
+    # Copilot is removed from the active stack
+    other.append("• **GitHub Copilot**: $200/mo budget envelope; no API key required. Usage tracked via GitHub billing.")
+    lines += other
+    lines.append("")
+
     # ── Routing Recommendations ───────────────────────────────────────────────
     lines.append("### 🧭 Routing recommendations")
     lines.append("")
@@ -2057,7 +2035,7 @@ def render_budget_section(
         if routing_mode == "frugal":
             recs.append(
                 "🔴 **Ollama quota critical** — 2.3% left this week. "
-                "Stop Ollama L2+ immediately. Move all profiles to Copilot or Cursor.")
+                "Stop Ollama L2+ immediately. Move all profiles to Cursor flat fallback.")
         elif routing_mode == "conservative":
             recs.append(
                 "🟠 **Ollama quota tight** — only L1 models safe (`gpt-oss:20b`, `gemma4:31b`). "
@@ -2066,28 +2044,17 @@ def render_budget_section(
             recs.append(
                 "🟢 **Ollama quota healthy** — L2/L3 models available this week.")
 
-    # Copilot cache signal
-    if cop_cache_eff > 60:
-        recs.append(
-            f"🟢 **Copilot cache {cop_cache_eff:.0f}%** — long sessions reuse context cheaply. "
-            "apollo, reviewer, orchestrator are well-placed here.")
-    elif cop_cache_eff < 20 and cop_mtd_calls > 100:
-        recs.append(
-            f"🟡 **Copilot cache {cop_cache_eff:.0f}%** — short sessions wasting cache. "
-            "Pin a shared system-prompt prefix across sessions to warm the cache.")
-
-    # Cost comparison
-    if cop_daily_calls > 0 and cur_daily_calls > 0:
-        cop_unit_v = cop_cfg["monthly_usd"] / max(cop_proj, 1) * 1000
-        cur_unit_v = cur_cfg["monthly_usd"] / max(cur_proj, 1) * 1000
-        if cop_unit_v < cur_unit_v:
+    # Provider fallback signal
+    if oll_daily_calls > 0:
+        cur_denom = max(cur_mtd_calls, 1)
+        cur_unit_v = cur_cfg["monthly_usd"] / cur_denom * 1000 if cur_mtd_calls > 0 else 0
+        if cur_mtd_calls > 0:
             recs.append(
-                f"📊 **Copilot cheapest/call** (${cop_unit_v:.2f}/1K vs Cursor ${cur_unit_v:.2f}/1K). "
-                "Heavy agentic sessions → Copilot. Coding delegation → Cursor.")
+                f"📊 **Cursor flat** ${cur_unit_v:.2f}/1K calls vs **Ollama quota**. "
+                "Cursor wins when Ollama weekly quota > 70% or session quota is tight.")
         else:
             recs.append(
-                f"📊 **Cursor cheapest/call** (${cur_unit_v:.2f}/1K vs Copilot ${cop_unit_v:.2f}/1K). "
-                "Heavy agentic sessions → Cursor. Cache-heavy reviews → Copilot.")
+                "📊 **Cursor flat** is a $200/mo insurance policy; no usage to compare yet.")
 
     if act_cost > 0:
         monthly_est = act_cost / 4 * 4.33
@@ -2125,22 +2092,19 @@ def render_budget_section(
         {
             "name": "FRUGAL",
             "icon": "🔴",
-            "desc": "Ollama quota exhausted — Cursor flat + Copilot cache sessions only",
+            "desc": "Ollama quota exhausted — Cursor flat fallback only",
             "when": "Ollama weekly quota > 90%",
             "heavy": {   # apollo / orchestrator / reviewer
                 "model": "claude-sonnet-4.6",
-                "provider": "cursor",
-                "fallback": 'fallback_providers: \'[{"provider":"copilot","model":"claude-sonnet-4.6"}]\'',
+                "provider": "cursor"
             },
             "mid": {     # default / specifier / deployer
                 "model": "kimi-k2.7-code",
-                "provider": "cursor",
-                "fallback": 'fallback_providers: \'[{"provider":"copilot","model":"claude-sonnet-4.6"}]\'',
+                "provider": "cursor"
             },
             "light": {   # athena / nihongo-*
                 "model": "gpt-5.4-nano",
-                "provider": "cursor",
-                "fallback": 'fallback_providers: \'[{"provider":"copilot","model":"gpt-5-mini"}]\'',
+                "provider": "cursor"
             },
         },
         {
@@ -2150,8 +2114,7 @@ def render_budget_section(
             "when": "Ollama weekly quota 70–90% and ≤3d remaining",
             "heavy": {
                 "model": "gemma4:31b",
-                "provider": "ollama-cloud",
-                "fallback": 'fallback_providers: \'[{"provider":"cursor","model":"claude-sonnet-4.6"},{"provider":"copilot","model":"claude-sonnet-4.6"}]\'',
+                "provider": "ollama-cloud"
             },
             "mid": {
                 "model": "gpt-oss:20b",
@@ -2171,8 +2134,7 @@ def render_budget_section(
             "when": "Default / mid-week / quota 40–70%",
             "heavy": {
                 "model": "deepseek-v4-flash",
-                "provider": "ollama-cloud",
-                "fallback": 'fallback_providers: \'[{"provider":"cursor","model":"claude-sonnet-4.6"},{"provider":"copilot","model":"claude-sonnet-4.6"}]\'',
+                "provider": "ollama-cloud"
             },
             "mid": {
                 "model": "gemma4:31b",
@@ -2461,7 +2423,7 @@ def render_consumption_analysis(budget: dict) -> list[str]:
     lines.append("")
     if opus_cost > 0 and cop_total > 0:
         pct = opus_cost / cop_total * 100
-        cop_cap = MONTHLY_BUDGETS["copilot"]
+        cop_cap = MONTHLY_BUDGETS.get("copilot", 0.0)
         equiv_months = cop_total / cop_cap
         lines.append(
             f"• **Copilot Opus overuse**: {pct:.0f}% of Copilot spend ({opus_calls:,} calls, "
@@ -2832,7 +2794,6 @@ def render_budget_brief(budget: dict) -> list[str]:
         mode = "🟡 BALANCED"
         mode_action = "Ollama mid → L1/L2 + Cursor"
 
-    cop_icon = "🔴" if proj_pct > 95 else ("🟡" if proj_pct > 80 else "🟢")
     oll_icon = "🔴" if (wk_frac or 0) > 0.90 else ("🟠" if (wk_frac or 0) > 0.70 else "🟢")
 
     lines = [
@@ -3003,15 +2964,16 @@ def main():
     # ── Fetch all data ────────────────────────────────────────────────────────
     spend = analyze_spend(window_days=1)
     spend_picks = pick_best_models(spend)
-    ollama_key = get_ollama_api_key()
+    ollama_keys = get_ollama_api_keys()
     ollama_ok = False
     ollama_rows: list[dict] = []
-    if ollama_key:
-        ids = fetch_ollama_cloud_ids(ollama_key)
+    primary_key = ollama_keys[0] if ollama_keys else ""
+    if primary_key:
+        ids = fetch_ollama_cloud_ids(primary_key)
         if ids:
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                 futs = {
-                    pool.submit(enrich_ollama_model, ollama_key, mid): mid
+                    pool.submit(enrich_ollama_model, primary_key, mid): mid
                     for mid in ids
                 }
                 for fut in concurrent.futures.as_completed(futs):
@@ -3034,7 +2996,7 @@ def main():
     cursor_models, cursor_cache_age = fetch_cursor_models()
     cursor_ok = bool(cursor_models)
 
-    budget = analyze_budget(ollama_key)
+    budget = analyze_budget(ollama_keys)
 
     # ── .md file: action-first structure ─────────────────────────────────────
     # Section order: header → budget optimizer → 30d analysis → active spend →
@@ -3056,7 +3018,7 @@ def main():
     full.extend(render_in_use(profiles))
 
     # ── Catalogs (reference — open the HTML for these) ────────────────────────
-    if not ollama_key:
+    if not primary_key:
         full.append("## Ollama Cloud")
         full.append("❌ no `OLLAMA_API_KEY`")
         full.append("")

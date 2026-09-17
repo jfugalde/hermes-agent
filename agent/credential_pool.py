@@ -22,6 +22,12 @@ from agent.credential_persistence import (
     is_borrowed_credential_source,
     sanitize_borrowed_credential_payload,
 )
+from agent.ollama_quota_cache import (
+    STATUS_AT_RISK as OLLAMA_STATUS_AT_RISK,
+    STATUS_EXHAUSTED as OLLAMA_STATUS_EXHAUSTED,
+    get_ollama_key_status_cached as _get_ollama_key_status,
+    maybe_refresh_in_background as _maybe_refresh_ollama_quota,
+)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -2365,6 +2371,13 @@ class CredentialPool:
         return False
 
     def select(self) -> Optional[PooledCredential]:
+        # Kick a background cache refresh for Ollama Cloud quota so the
+        # proactive skip sees fresh data without blocking the pool lock.
+        if self.provider == "ollama-cloud":
+            try:
+                _maybe_refresh_ollama_quota()
+            except Exception:
+                pass
         entry, pending_refresh = self._select_under_lock()
         if pending_refresh:
             self._refresh_pending_entries(pending_refresh)
@@ -2592,6 +2605,28 @@ class CredentialPool:
             self._current_id = None
             self._log_no_available_entries()
             return None, pending_refresh
+
+        # Proactive quota skip for Ollama Cloud: prefer a key whose account
+        # window is not at risk. The quota cache is a fast local read (refreshed
+        # hourly); a key that has burned >= its at_risk threshold is skipped
+        # when a healthier key exists, so we rotate BEFORE the 429 instead of
+        # paying one failed request per exhausted key. Exhausted keys are always
+        # skipped. The reactive 429 rotation backstops any cache miss.
+        if self.provider == "ollama-cloud" and len(available) > 1:
+            try:
+                quota_status = _get_ollama_key_status()
+            except Exception:
+                quota_status = {}
+            if quota_status:
+                def _env_var_for(entry: PooledCredential) -> str:
+                    src = entry.source or ""
+                    return src[len("env:"):] if src.startswith("env:") else ""
+                healthy = [
+                    e for e in available
+                    if quota_status.get(_env_var_for(e)) not in (OLLAMA_STATUS_AT_RISK, OLLAMA_STATUS_EXHAUSTED)
+                ]
+                if healthy:
+                    available = healthy
 
         # A successful selection means the pool recovered; re-arm the throttle
         # so a later re-exhaustion logs immediately rather than being silenced

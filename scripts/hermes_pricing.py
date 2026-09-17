@@ -156,17 +156,35 @@ def fetch_ollama_activity(key: str) -> dict:
     return out
 
 
-def _ollama_api_key() -> str:
-    k = os.environ.get("OLLAMA_API_KEY", "").strip()
-    if k:
-        return k
-    # Fall back to dotenv-loaded value.
-    try:
-        from dotenv import load_dotenv as _load_dotenv
-        _load_dotenv("OLLAMA_API_KEY")
-        return os.environ.get("OLLAMA_API_KEY", "")
-    except Exception:
-        return ""
+def _ollama_api_keys() -> list[str]:
+    """Return all non-empty Ollama Cloud API keys (primary + fallback)."""
+    keys: list[str] = []
+    for name in ("OLLAMA_API_KEY", "OLLAMA_API_KEY_FALLBACK"):
+        k = os.environ.get(name, "").strip()
+        if not k:
+            try:
+                from dotenv import load_dotenv as _load_dotenv
+                _load_dotenv(name)
+                k = os.environ.get(name, "")
+            except Exception:
+                pass
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def fetch_all_ollama_activity(keys: list[str] | None = None) -> dict:
+    """Aggregate Ollama Cloud /api/usage cost+reqs across all keys."""
+    if keys is None:
+        keys = _ollama_api_keys()
+    merged: dict[str, dict] = {}
+    for k in keys:
+        for model, info in fetch_ollama_activity(k).items():
+            if model not in merged:
+                merged[model] = {"cost_usd": 0.0, "reqs": 0}
+            merged[model]["cost_usd"] += info.get("cost_usd", 0.0)
+            merged[model]["reqs"] += info.get("reqs", 0) or 0
+    return merged
 
 
 def read_cache() -> dict:
@@ -186,7 +204,7 @@ def refresh_cache() -> dict:
         cache["per_m"] = or_pricing
         cache["source"] = "openrouter"
 
-    activity = fetch_ollama_activity(_ollama_api_key())
+    activity = fetch_all_ollama_activity()
     if activity:
         cache["ollama_activity"] = activity
 

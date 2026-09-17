@@ -2077,5 +2077,112 @@ class TestCredentialPoolQueryLocking:
             )
         finally:
             inner.release()
-
         assert done.wait(timeout=2.0), f"{method}() did not complete after lock release"
+
+
+def test_ollama_cloud_proactive_quota_skip(tmp_path, monkeypatch):
+    """An ollama-cloud key at_risk is skipped when a healthier key exists.
+
+    The quota cache marks the Pro key (weekly 0.9 -> at_risk) and the Max key
+    (monthly 0.5 -> ok). Selection must prefer the Max key even though the Pro
+    key has higher priority, because the Pro account window is nearly burned.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "ollama-cloud": [
+                    {
+                        "id": "pro",
+                        "label": "env:OLLAMA_API_KEY",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "env:OLLAMA_API_KEY",
+                        "access_token": "pro-key",
+                        "base_url": "https://ollama.com",
+                    },
+                    {
+                        "id": "max",
+                        "label": "env:OLLAMA_API_KEY_FALLBACK",
+                        "auth_type": "api_key",
+                        "priority": 1,
+                        "source": "env:OLLAMA_API_KEY_FALLBACK",
+                        "access_token": "max-key",
+                        "base_url": "https://ollama.com",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+    from agent import ollama_quota_cache as qc
+    import agent.credential_pool as cp
+
+    # Pro at_risk (weekly 0.9), Max ok (monthly 0.5)
+    monkeypatch.setattr(
+        cp,
+        "_get_ollama_key_status",
+        lambda: {
+            "OLLAMA_API_KEY": qc.STATUS_AT_RISK,
+            "OLLAMA_API_KEY_FALLBACK": qc.STATUS_OK,
+        },
+    )
+
+    pool = load_pool("ollama-cloud")
+    entry = pool.select()
+    assert entry is not None
+    assert entry.id == "max", f"expected Max key selected, got {entry.id}"
+
+
+def test_ollama_cloud_proactive_quota_keeps_primary_when_ok(tmp_path, monkeypatch):
+    """When both keys are healthy, the higher-priority Pro key is selected."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "ollama-cloud": [
+                    {
+                        "id": "pro",
+                        "label": "env:OLLAMA_API_KEY",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "env:OLLAMA_API_KEY",
+                        "access_token": "pro-key",
+                        "base_url": "https://ollama.com",
+                    },
+                    {
+                        "id": "max",
+                        "label": "env:OLLAMA_API_KEY_FALLBACK",
+                        "auth_type": "api_key",
+                        "priority": 1,
+                        "source": "env:OLLAMA_API_KEY_FALLBACK",
+                        "access_token": "max-key",
+                        "base_url": "https://ollama.com",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+    from agent import ollama_quota_cache as qc
+    import agent.credential_pool as cp
+
+    monkeypatch.setattr(
+        cp,
+        "_get_ollama_key_status",
+        lambda: {
+            "OLLAMA_API_KEY": qc.STATUS_OK,
+            "OLLAMA_API_KEY_FALLBACK": qc.STATUS_OK,
+        },
+    )
+
+    pool = load_pool("ollama-cloud")
+    entry = pool.select()
+    assert entry is not None
+    assert entry.id == "pro", f"expected Pro key selected, got {entry.id}"
