@@ -306,6 +306,17 @@ native/fts5_cjk/*.so
 /.archive/
 /.bak-archive/
 /.curator_backups/
+# Skills-hub runtime state that lives UNDER skills/ (the root-anchored
+# /.curator_backups/ above does not match these). .curator_backups holds
+# skills.tar.gz snapshots of the ENTIRE skill corpus -- on a public repo a
+# single `git add -A` would publish client/business skills that exist only
+# as untracked working-tree files. Keep every one of these out of git.
+/skills/.curator_backups/
+/skills/.curator_ledger.jsonl
+/skills/.usage.json
+/skills/index-cache/
+/skills/.usage.lock
+/skills/.hub/
 /disk-cleanup/
 /files/
 /lsp/
