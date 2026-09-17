@@ -1,13 +1,17 @@
 name: CI
 
-# Minimal CI for this personal fork. The upstream orchestrator (detect ->
-# tests x8, lint, js, e2e-desktop, docs, docker, supply-chain, osv, review
-# labels, timings) is overkill here: no branch protection, no external
-# consumers, single maintainer. We keep ONE lightweight job that fails fast
-# on syntax errors across Python and JS, so a bad merge can't land silently.
+# Fork-local CI for a personal Hermes home (config + skills + local scripts).
 #
-# This is intentionally narrow. If a real test/lint need emerges, add a
-# focused job — do not restore the full orchestrator.
+# Upstream's release-engineering lanes were deliberately removed from this
+# fork. They required paid GitHub "large" runners (ubuntu-latest-32-core,
+# ubuntu-latest-96-core, windows-latest-32-core) that a personal fork does
+# not have, so the jobs sat queued until GitHub's 24h limit and then reported
+# `cancelled`. The result was a permanently red board that never actually
+# tested anything. Re-pull the upstream workflows from NousResearch/hermes-agent
+# if this fork ever needs to validate Hermes internals again.
+#
+# What remains checks the things THIS repo actually owns: the tracked config,
+# the skill library, and the local scripts.
 
 on:
   pull_request:
@@ -16,52 +20,184 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  syntax-check:
-    name: Syntax check
+  # ─────────────────────────────────────────────────────────────────────
+  # Every tracked Python file must at least compile. Catches truncated
+  # edits, bad merges, and half-applied patches across the whole tree.
+  # ─────────────────────────────────────────────────────────────────────
+  syntax:
+    name: Python syntax
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Compile all Python sources
+      - name: Compile every tracked Python file
         run: |
           set -euo pipefail
-          failed=0
-          while IFS= read -r f; do
-            if ! python3 -m py_compile "$f"; then
-              echo "::error file=$f::Python syntax error"
-              failed=1
-            fi
-          done < <(find . -name '*.py' -not -path '*/venv/*' -not -path '*/.venv/*' \
-            -not -path '*/node_modules/*' -not -path '*/\.git/*' | sort)
-          exit "$failed"
+          COUNT=$(git ls-files '*.py' | wc -l | tr -d ' ')
+          # Parallel: the tree is ~5k files, which is slow serially.
+          git ls-files -z '*.py' | xargs -0 -n1 -P "$(nproc)" python3 -m py_compile
+          echo "::notice::compiled ${COUNT} tracked Python file(s)"
 
-      - name: Check YAML workflow syntax
+  # ─────────────────────────────────────────────────────────────────────
+  # Every tracked YAML file must parse. This is the gate that would have
+  # caught the class of hand-edit that silently corrupts config.yaml, and
+  # it covers the workflow files themselves.
+  # ─────────────────────────────────────────────────────────────────────
+  config:
+    name: YAML parses
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Parse tracked YAML
         run: |
-          set -euo pipefail
           python3 - <<'PY'
-          import glob, sys
-          try:
-              import yaml
-          except ImportError:
-              print("PyYAML not installed — skipping YAML parse check")
-              sys.exit(0)
+          import sys, subprocess, pathlib, yaml
+
+          files = subprocess.run(
+              ["git", "ls-files", "*.yml", "*.yaml"],
+              capture_output=True, text=True, check=True,
+          ).stdout.split()
           bad = []
-          for f in glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"):
+          for name in files:
               try:
-                  with open(f) as fh:
-                      yaml.safe_load(fh)
-              except Exception as e:
-                  bad.append((f, str(e)))
+                  yaml.safe_load(pathlib.Path(name).read_text(encoding="utf-8"))
+              except Exception as exc:
+                  bad.append((name, f"{type(exc).__name__}: {exc}".splitlines()[0]))
+          print(f"checked {len(files)} YAML file(s)")
+          for name, why in bad:
+              print(f"::error file={name}::{why}")
           if bad:
-              for f, e in bad:
-                  print(f"ERROR {f}: {e}", file=sys.stderr)
+              print(f"::error::{len(bad)} YAML file(s) failed to parse")
               sys.exit(1)
-          print(f"OK: parsed {len(glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'))} workflow files")
           PY
+
+  # ─────────────────────────────────────────────────────────────────────
+  # The skill library is the bulk of this repo (1000+ SKILL.md files). A
+  # malformed frontmatter block makes a skill invisible to the loader, and
+  # nothing else in CI would notice.
+  # ─────────────────────────────────────────────────────────────────────
+  skills:
+    name: Skill frontmatter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate every SKILL.md frontmatter
+        run: |
+          python3 - <<'PY'
+          import sys, pathlib, yaml
+
+          # Both shipped skill trees: `skills/` (default set) and
+          # `optional-skills/` (opt-in set). Scanning only one would leave
+          # half the library unverified.
+          files = sorted(
+              p
+              for root in ("skills", "optional-skills")
+              for p in pathlib.Path(root).rglob("SKILL.md")
+          )
+          bad = []
+          for path in files:
+              text = path.read_text(encoding="utf-8", errors="replace")
+              if not text.lstrip().startswith("---"):
+                  bad.append((path, "missing frontmatter block"))
+                  continue
+              parts = text.split("---", 2)
+              if len(parts) < 3:
+                  bad.append((path, "unterminated frontmatter block"))
+                  continue
+              try:
+                  meta = yaml.safe_load(parts[1])
+              except Exception as exc:
+                  bad.append((path, f"frontmatter does not parse: {exc}".splitlines()[0]))
+                  continue
+              if not isinstance(meta, dict):
+                  bad.append((path, "frontmatter is not a mapping"))
+                  continue
+              for key in ("name", "description"):
+                  if not meta.get(key):
+                      bad.append((path, f"frontmatter missing required key: {key}"))
+          print(f"checked {len(files)} SKILL.md file(s)")
+          for path, why in bad[:50]:
+              print(f"::error file={path}::{why}")
+          if bad:
+              print(f"::error::{len(bad)} skill file(s) failed validation")
+              sys.exit(1)
+          PY
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Repo hygiene guards. Both are unconditional upstream checks that still
+  # apply here and cost seconds to run.
+  # ─────────────────────────────────────────────────────────────────────
+  guards:
+    name: Repo hygiene guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Reject case-colliding paths
+        # A pair differing only by case breaks every clone on a
+        # case-insensitive filesystem (Windows, default macOS).
+        run: python3 scripts/check-case-collisions.py
+
+      - name: Reject profile export archives
+        # .gitignore cannot stop `git add -f`; this is the enforcement
+        # boundary for profile tarballs in the checkout.
+        run: python3 scripts/ci/check_profile_archive_boundary.py
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Attribution: every commit author must map to a contributors/emails
+  # entry. Cheap, and it catches "who is this commit from" drift early.
+  # ─────────────────────────────────────────────────────────────────────
+  contributor-check:
+    name: Check contributors
+    uses: ./.github/workflows/contributor-check.yml
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PR infographics belong in the PR body, never in git history.
+  # ─────────────────────────────────────────────────────────────────────
+  infographic-check:
+    name: Check no committed infographics
+    uses: ./.github/workflows/infographic-check.yml
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Single aggregate gate, so a required-check rule only needs one entry.
+  # `always()` keeps it reporting even when a dependency was skipped.
+  # ─────────────────────────────────────────────────────────────────────
+  all-checks-pass:
+    name: All required checks pass
+    needs:
+      - syntax
+      - config
+      - skills
+      - guards
+      - contributor-check
+      - infographic-check
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Evaluate job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | python3 -c "
+          import json, sys
+          needs = json.load(sys.stdin)
+          failed = [n for n, i in needs.items() if i['result'] == 'failure']
+          for name, info in sorted(needs.items()):
+              icon = '✅' if info['result'] in ('success', 'skipped') else '❌'
+              print(f'{icon} {name}: {info[\"result\"]}')
+          if failed:
+              print(f'::error::{len(failed)} job(s) failed: {\", \".join(failed)}')
+              sys.exit(1)
+          print('All checks passed (or were skipped)')
+          "

@@ -327,3 +327,30 @@ native/fts5_cjk/*.so
 # Per-profile runtime homes (gateway.lock, state.db*, .env, op_cache.json,
 # config.yaml.bak, logs/, cache/) — live runtime state, never repo content.
 /profiles/
+
+# ── Hermes runtime state (never versioned; public fork) ──────────────
+# Live execution state, not source. These were created at runtime and were
+# not covered by the earlier per-file rules (/state.db, /kanban.db, …).
+/cron/executions.db
+/cron/executions.db-wal
+/cron/executions.db-shm
+/cron/output/
+/cron/notepad.db
+/cron/jobs.json
+/cron/jobs.json.bak-*
+/cron/*.tmp
+/cron/ticker_heartbeat
+/cron/ticker_last_success
+/cron/catch_up_occurrences
+/cron/usage_audit.jsonl
+/spawn-ledger.json
+/pr-review-state.json
+/runs_idempotency.db
+/runs_idempotency.db-wal
+/runs_idempotency.db-shm
+/state.db.fts_rebuild.lock
+/config.yaml.pre-*
+/config.yaml.bak-*
+/profiles/*/config.yaml.pre-*
+/profiles/*/config.yaml.bak-*
+/scripts/.card-monitor-*.json

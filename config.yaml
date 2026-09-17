@@ -1,6 +1,8 @@
 model:
-  default: deepseek-v4-flash
+  default: deepseek-v4.1-flash
   provider: ollama-cloud
+  base_url: https://ollama.com/v1
+  api_mode: chat_completions
 providers:
   ollama-default:
     api: http://127.0.0.1:11434/v1
@@ -35,27 +37,26 @@ providers:
     name: Ollama Cloud
     default_model: gemma4:31b
     models:
+      - deepseek-v4-pro:0813
+      - deepseek-v4.1-flash
       - gemma4:31b
-      - deepseek-v4-pro
-      - deepseek-v4-flash
-      - qwen3.5:397b
-      - mistral-large-3:675b
-      - id: kimi-k2.7-code
-        context_length: 262144
-      - kimi-k2.6
-      - kimi-k2.5
-      - nemotron-3-ultra
-      - nemotron-3-super
-      - nemotron-3-nano:30b
       - glm-5.2
-      - glm-5.1
-      - id: minimax-m3
-        context_length: 1000000
-      - id: minimax-m2.7
-        context_length: 196608
-      - minimax-m2.5
+      - glm-5.3
+      - glm-5.3-flash
       - gpt-oss:120b
       - gpt-oss:20b
+      - kimi-k2.6
+      - id: kimi-k2.7-code
+        context_length: 262144
+      - kimi-k3
+      - id: minimax-m2.7
+        context_length: 196608
+      - id: minimax-m3
+        context_length: 1000000
+      - mistral-large-3:675b
+      - nemotron-3-nano:30b
+      - nemotron-3-super
+      - nemotron-3-ultra
     key_env: OLLAMA_API_KEY
   custom:
     api: http://127.0.0.1:11434/v1
@@ -90,10 +91,15 @@ providers:
       - id: gpt-5.4-nano-low
         context_length: 400000
     name: Cursor (Go Adapter)
+fallback_providers:
+  - provider: ollama-cloud
+    model: gemma4:31b
+  - provider: cursor-go
+    model: gpt-5.4-nano-low
 toolsets: '["hermes-cli","web","kanban"]'
-max_live_sessions: 4
+max_live_sessions: 6
 agent:
-  max_turns: 60
+  max_turns: 120
   gateway_timeout: 1800
   restart_drain_timeout: 180
   api_max_retries: 3
@@ -155,7 +161,7 @@ terminal:
   modal_mode: auto
   cwd: .
   timeout: 180
-  daemon_term_grace_seconds: 2.0
+  daemon_term_grace_seconds: 2
   env_passthrough: []
   home_mode: auto
   shell_init_files: []
@@ -227,6 +233,7 @@ tool_loop_guardrails:
     idempotent_no_progress: 5
 compression:
   enabled: true
+  progress_notices: true
   threshold: 0.2
   target_ratio: 0.2
   protect_last_n: 20
@@ -239,18 +246,6 @@ compression:
   turn_trigger_min_tokens: 126000
 prompt_caching:
   cache_ttl: 5m
-semantic_cache:
-  enabled: true # Toggle for the entire semantic response cache system
-  auto_populate: true # Automatically cache responses that meet quality thresholds
-  pre_dispatch: true # Check cache before dispatching to the LLM
-  ttl_seconds: 300 # Cache expiration time in seconds
-  embed_model: qwen3-embedding:0.6b # Model used for generating embeddings (requires local Ollama)
-  similarity_threshold: 0.94 # Cosine similarity threshold for a cache hit
-  max_prompt_chars: 2000 # Maximum prompt length to consider for caching
-
-  response_cache: true
-  response_cache_ttl: 300
-  min_coding_score: 0.65
 bedrock:
   region: ''
   discovery:
@@ -264,23 +259,13 @@ bedrock:
     trace: disabled
 auxiliary:
   vision:
-    provider: openai
-    model: qwen2.5vl:7b
-    base_url: http://localhost:11434/v1
-    api_key: ollama
+    provider: ollama-cloud
+    model: gemma4:31b
     timeout: 120
     download_timeout: 30
-  web_extract:
-    provider: auto
-    model: ''
-    base_url: ''
-    api_key: ''
-    timeout: 360
   compression:
-    provider: ollama-default
-    model: qwen3-hermes-8b
-    base_url: http://127.0.0.1:11434/v1
-    api_key: ollama
+    provider: ollama-cloud
+    model: gemma4:31b
     timeout: 120
   skills_hub:
     provider: auto
@@ -361,8 +346,14 @@ auxiliary:
     base_url: ''
     api_key: ''
     timeout: 600
+  web_extract:
+    provider: auto
+    model: ''
+    base_url: ''
+    api_key: ''
+    timeout: 360
 display:
-  compact: false
+  compact: true
   personality: ''
   resume_display: full
   resume_exchanges: 10
@@ -370,29 +361,31 @@ display:
   resume_max_assistant_chars: 200
   resume_max_assistant_lines: 3
   resume_skip_tool_only: true
-  busy_input_mode: interrupt
+  busy_input_mode: steer
   interface: cli
-  tui_auto_resume_recent: false
+  tui_auto_resume_recent: true
   tui_agents_nudge: true
-  bell_on_complete: false
-  show_reasoning: false
+  bell_on_complete: true
+  show_reasoning: true
   reasoning_full: false
   memory_notifications: 'on'
+  background_process_notifications: concise
   streaming: true
   timestamps: false
   final_response_markdown: strip
   persistent_output: true
   persistent_output_max_lines: 200
+  cli_rebuild_scrollback_on_redraw: true
   persist_prompts: true
   inline_diffs: true
   file_mutation_verifier: true
   credits_notices: true
   turn_completion_explainer: true
-  show_cost: false
+  show_cost: true
   skin: default
   language: en
   tui_status_indicator: kaomoji
-  cli_refresh_interval: 1.0
+  cli_refresh_interval: 1
   user_message_preview:
     first_lines: 2
     last_lines: 2
@@ -422,13 +415,12 @@ display:
     render_mode: auto
     scale: 0.33
     unicode_cols: 0
-  background_process_notifications: all
   busy_ack_detail: true
   cleanup_progress: false
   long_running_notifications: true
   tool_progress: all
 dashboard:
-  theme: default
+  theme: cyberpunk
   show_token_analytics: false
   oauth:
     client_id: ''
@@ -478,7 +470,6 @@ tts:
   use_gateway: false
 stt:
   enabled: true
-  provider: local
   local:
     model: base
     language: ''
@@ -491,13 +482,14 @@ stt:
     language_code: ''
     tag_audio_events: false
     diarize: false
+  provider: local
 voice:
   record_key: ctrl+b
   max_recording_seconds: 120
   auto_tts: false
   beep_enabled: true
   silence_threshold: 200
-  silence_duration: 3.0
+  silence_duration: 3
 human_delay:
   mode: 'off'
   min_ms: 800
@@ -510,22 +502,22 @@ memory:
   write_approval: false
   memory_char_limit: 2200
   user_char_limit: 1375
+  nudge_interval: 10
   provider: clawmem
   flush_min_turns: 6
-  nudge_interval: 10
 delegation:
   model: gemma4:31b
   provider: ollama-cloud
   api_mode: chat_completions
   inherit_mcp_toolsets: true
-  inherit_memory: true
   max_iterations: 30
   child_timeout_seconds: 0
-  reasoning_effort: low
+  reasoning_effort: medium
   max_concurrent_children: 4
   max_spawn_depth: 2
   orchestrator_enabled: true
-  subagent_auto_approve: false
+  subagent_auto_approve: true
+  inherit_memory: true
   max_async_children: 4
 prefill_messages_file: ''
 goals:
@@ -549,7 +541,10 @@ moa:
       aggregator_temperature: 0.4
       reference_max_tokens: 800
 skills:
-  external_dirs: []
+  external_dirs:
+    - /home/vivojf/.hermes/skills
+  trusted_project_dirs:
+    - /home/vivojf/infrastructure
   template_vars: true
   inline_shell: false
   inline_shell_timeout: 10
@@ -591,7 +586,7 @@ discord:
     ambient_path: ''
     ambient_gain: 0.18
     duck_gain: 0.06
-    speech_gain: 1.0
+    speech_gain: 1
     ack_enabled: true
     ack_phrases:
       - Let me look into that.
@@ -620,33 +615,53 @@ approvals:
   mcp_reload_confirm: true
   destructive_slash_confirm: false
 command_allowlist:
-  - git reset --hard (destroys uncommitted changes)
-  - overwrite project env/config file
-  - kill hermes/gateway process (self-termination)
-  - stop/restart hermes gateway (kills running agents)
-  - execute_code
-  - shell execution via heredoc
+  - SQL DROP
   - force kill processes (killall -KILL)
-  - sudo with privilege flag (stdin/askpass/shell/list)
-  - sudo with combined-flag privilege escalation
-  - docker restart/stop/kill (container lifecycle)
-  - SQL TRUNCATE
-  - force kill processes
-  - overwrite project env/config via redirection
-  - script execution via heredoc
-  - stop/restart system service
-  - pipe remote content to shell
-  - disk copy
-  - shell command via -c/-lc flag
-  - recursive delete
-  - git force push short flag (rewrites remote history)
-  - git force push (rewrites remote history)
-  - delete in root path
-  - in-place edit of Hermes config/env
-  - overwrite system file via redirection
-  - git branch force delete
+  - stop/restart hermes gateway (kills running agents)
   - docker compose restart/stop/kill/down (container lifecycle)
+  - sudo with combined-flag privilege escalation
+  - git reset --hard (destroys uncommitted changes)
+  - stop/restart system service
+  - git branch force delete
   - script execution via -e/-c flag
+  - docker restart/stop/kill (container lifecycle)
+  - shell execution via heredoc
+  - copy/move file into sensitive credential/SSH/shell-rc path
+  - overwrite system file via redirection
+  - overwrite project env/config file
+  - pipe remote content to shell
+  - execute_code
+  - command parser limit or malformed executable payload
+  - kill hermes/gateway process (self-termination)
+  - recursive delete
+  - sudo with privilege flag (stdin/askpass/shell/list)
+  - in-place edit of Hermes config/env
+  - shell command via -c/-lc flag
+  - SQL TRUNCATE
+  - disk copy
+  - script execution via heredoc
+  - delete in root path
+  - overwrite project env/config via redirection
+  - git force push (rewrites remote history)
+  - force kill processes
+  - git force push short flag (rewrites remote history)
+plugins:
+  clawmem:
+    serve_port: 3030
+  enabled:
+    - copilot-acp-provider
+    - copilot-provider
+    - cursor-provider
+    - dashboard_auth/basic
+    - fal
+    - model-providers/cursor
+    - observability/langfuse
+  disabled: []
+  entries:
+    observability/langfuse:
+      allow_tool_override: false
+    dashboard_auth/basic:
+      allow_tool_override: false
 hooks_auto_accept: false
 security:
   allow_private_urls: false
@@ -701,7 +716,6 @@ logging:
 model_catalog:
   enabled: true
   url: https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
-  ttl_hours: 1
 network:
   force_ipv4: false
 gateway:
@@ -726,7 +740,7 @@ streaming:
   edit_interval: 0.8
   buffer_threshold: 24
   cursor: ' ▉'
-  fresh_final_after_seconds: 0.0
+  fresh_final_after_seconds: 0
 sessions:
   auto_prune: false
   retention_days: 90
@@ -745,7 +759,7 @@ updates:
 lsp:
   enabled: true
   wait_mode: document
-  wait_timeout: 5.0
+  wait_timeout: 5
   install_strategy: auto
 x_search:
   model: grok-4.20-reasoning
@@ -767,6 +781,7 @@ secrets:
       CURSOR_API_KEY_FALLBACK: op://Infrastructure/Cursor API Key/CURSOR_API_KEY_FALLBACK
       CURSOR_API_KEY_FALLBACK2: op://Infrastructure/Cursor API Key/CURSOR_API_KEY_FALLBACK2
       PERPLEXITY_API_KEY: op://Infrastructure/perplexity/add more/API_KEY
+      MCP_LINEAR_API_KEY: op://Infrastructure/Linear/vivojf_key
     account: ''
     service_account_token_env: OP_SERVICE_ACCOUNT_TOKEN
     binary_path: ''
@@ -777,13 +792,24 @@ paste_collapse_threshold_fallback: 5
 paste_collapse_char_threshold: 2000
 computer_use:
   cua_telemetry: false
-_config_version: 33
+_config_version: 40
+semantic_cache:
+  enabled: true
+  auto_populate: true
+  pre_dispatch: true
+  ttl_seconds: 300
+  embed_model: qwen3-embedding:0.6b
+  similarity_threshold: 0.94
+  max_prompt_chars: 2000
+  response_cache: true
+  response_cache_ttl: 300
+  min_coding_score: 0.65
 model_tiers:
   low:
     model: gemma4:31b
     provider: ollama-cloud
   mid:
-    model: deepseek-v4-flash
+    model: deepseek-v4.1-flash
     provider: ollama-cloud
   high:
     model: sonar
@@ -793,42 +819,55 @@ custom_providers:
     base_url: https://api.perplexity.ai
     key_env: PERPLEXITY_API_KEY
     models:
-      - anthropic/claude-haiku-4-5
-      - anthropic/claude-opus-4-5
-      - anthropic/claude-opus-4-6
-      - anthropic/claude-opus-4-7
-      - anthropic/claude-opus-4-8
-      - anthropic/claude-opus-5
-      - anthropic/claude-sonnet-4-5
-      - anthropic/claude-sonnet-4-6
-      - anthropic/claude-sonnet-5
-      - google/gemini-3-flash-preview
-      - google/gemini-3.1-flash-lite
-      - google/gemini-3.1-pro-preview
-      - google/gemini-3.5-flash
-      - google/gemini-3.5-flash-lite
-      - google/gemini-3.6-flash
-      - nvidia/nemotron-3-super-120b-a12b
-      - openai/gpt-5
-      - openai/gpt-5-mini
-      - openai/gpt-5.1
-      - openai/gpt-5.2
-      - openai/gpt-5.4
-      - openai/gpt-5.4-mini
-      - openai/gpt-5.4-nano-low
-      - openai/gpt-5.5
-      - openai/gpt-5.6-luna
-      - openai/gpt-5.6-sol
-      - openai/gpt-5.6-terra
-      - perplexity/glm-5.2
-      - perplexity/kimi-k2.7-code
-      - perplexity/kimi-k3
-      - perplexity/sonar
-      - xai/grok-4.20-multi-agent
-      - xai/grok-4.20-non-reasoning
-      - xai/grok-4.20-reasoning
-      - xai/grok-4.3
-      - xai/grok-4.5
+      anthropic/claude-fable-5: {}
+      anthropic/claude-fable-5-1: {}
+      anthropic/claude-haiku-4-5: {}
+      anthropic/claude-opus-4-5: {}
+      anthropic/claude-opus-4-6: {}
+      anthropic/claude-opus-4-7: {}
+      anthropic/claude-opus-4-8: {}
+      anthropic/claude-opus-5: {}
+      anthropic/claude-sonnet-4-5: {}
+      anthropic/claude-sonnet-4-6: {}
+      anthropic/claude-sonnet-5: {}
+      google/gemini-3-flash-preview: {}
+      google/gemini-3.1-flash-lite: {}
+      google/gemini-3.1-pro-preview: {}
+      google/gemini-3.5-flash: {}
+      google/gemini-3.5-flash-lite: {}
+      google/gemini-3.6-flash: {}
+      google/gemini-3.7-flash: {}
+      google/gemini-3.8-flash: {}
+      openai/gpt-5: {}
+      openai/gpt-5-mini: {}
+      openai/gpt-5-nano: {}
+      openai/gpt-5.1: {}
+      openai/gpt-5.2: {}
+      openai/gpt-5.3-codex: {}
+      openai/gpt-5.4: {}
+      openai/gpt-5.4-mini: {}
+      openai/gpt-5.4-nano: {}
+      openai/gpt-5.5: {}
+      openai/gpt-5.6-luna: {}
+      openai/gpt-5.6-sol: {}
+      openai/gpt-5.6-terra: {}
+      openai/gpt-6-astra: {}
+      perplexity/deepseek-v4-flash-0731: {}
+      perplexity/deepseek-v4-pro-0813: {}
+      perplexity/glm-5.2: {}
+      perplexity/glm-5.3: {}
+      perplexity/glm-5.3-flash: {}
+      perplexity/kimi-k2.7-code: {}
+      perplexity/kimi-k3: {}
+      perplexity/nemotron-3-ultra-550b-a55b: {}
+      perplexity/sonar: {}
+      xai/grok-4.20-multi-agent: {}
+      xai/grok-4.20-non-reasoning: {}
+      xai/grok-4.20-reasoning: {}
+      xai/grok-4.3: {}
+      xai/grok-4.5: {}
+      xai/grok-4.6: {}
+    models_discovered: true
 group_sessions_per_user: true
 platform_toolsets:
   cli:
@@ -901,7 +940,7 @@ platforms:
         bot_token_env: TELEGRAM_BOT_TOKEN
         allowed_user_ids_env: TELEGRAM_ALLOWED_USER_ID
 image_gen:
-  provider: openai-codex
+  provider: openai
   use_gateway: false
   model: gpt-image-2-medium
 known_plugin_toolsets:
@@ -909,16 +948,6 @@ known_plugin_toolsets:
     - spotify
   telegram:
     - spotify
-plugins:
-  clawmem:
-    serve_port: 3030
-  enabled:
-    - copilot-acp-provider
-    - copilot-provider
-    - cursor-provider
-    - fal
-    - model-providers/cursor
-  disabled: []
 mcp_servers:
   shopify-dev:
     command: /home/vivojf/.hermes/shopify-mcp/node_modules/.bin/shopify-dev-mcp
@@ -932,32 +961,13 @@ mcp_servers:
     enabled: true
   linear:
     url: https://mcp.linear.app/mcp
-    auth: oauth
     enabled: true
-fallback_providers:
-  - provider: ollama-cloud
-    model: gemma4:31b
-  - provider: cursor-go
-    model: gpt-5.4-nano-low
-
-# ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
-# Uncomment and configure to enable. Triggers on rate limits (429),
-# overload (529), service errors (503), or connection failures.
-#
-# Supported providers:
-#   openrouter   (OPENROUTER_API_KEY)  — routes to any model
-#   openai-codex (OAuth — hermes auth) — OpenAI Codex
-#   nous         (OAuth — hermes auth) — Nous Portal
-#   zai          (ZAI_API_KEY)         — Z.AI / GLM
-#   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
-#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
-#   minimax      (MINIMAX_API_KEY)     — MiniMax
-#   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
-#   bedrock      (AWS IAM / boto3)     — AWS Bedrock (Converse API)
-#
-# For custom OpenAI-compatible endpoints, add base_url and key_env.
-#
-# fallback_model:
-#   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+    headers:
+      Authorization: Bearer ${MCP_LINEAR_API_KEY}
+  playwright:
+    url: http://127.0.0.1:8931/mcp
+    enabled: true
+bot_peers:
+  localhost:
+    url: http://127.0.0.1:8642
+    note: local default gateway (UM790, :8642)
