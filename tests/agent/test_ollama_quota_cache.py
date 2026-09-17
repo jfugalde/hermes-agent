@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import os
 from agent import ollama_quota_cache as qc
 
 
@@ -246,3 +247,76 @@ def test_refresh_flag_released_after_failure(tmp_path, monkeypatch):
         time.sleep(0.1)
 
     assert qc._refresh_in_flight is False, "flag must be cleared even when the refresh raises"
+
+
+def test_write_cache_is_atomic(tmp_path, monkeypatch):
+    """A reader must never observe a torn (partial) cache file.
+
+    The original _write_cache used path.write_text(), which truncates the file
+    before writing. A concurrent _read_cache could land in that window, get a
+    partial file, raise JSONDecodeError, and silently drop the pool's proactive
+    signal to STATUS_OK. This simulates the truncation window deterministically
+    instead of relying on a timing race.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    # Seed a valid cache so the file exists for the whole test.
+    qc._write_cache({"updated_ts": time.time(), "keys": {"old": {"status": "ok"}}})
+
+    real_replace = os.replace
+    seen_partial = []
+
+    def spying_replace(src, dst):
+        # At the moment the swap happens, the destination must still hold a
+        # complete, parseable document -- the new one is already fully written.
+        with open(dst, encoding="utf-8") as fh:
+            json.loads(fh.read())
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spying_replace)
+    # A payload large enough that a non-atomic write would leave a visible
+    # truncation window.
+    qc._write_cache({
+        "updated_ts": time.time(),
+        "keys": {f"k{i}": {"status": "ok"} for i in range(2000)},
+    })
+    # NB: do not monkeypatch.undo() here -- it would also undo the HERMES_HOME
+    # setenv above and point the remaining assertions at the real home dir.
+    cache_path = qc._cache_path()
+
+    assert cache_path.exists(), "cache file must exist after a write"
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["keys"]
+    assert list(cache_path.parent.glob(".*.tmp")) == [], "temp file must not linger"
+
+
+def test_read_cache_survives_concurrent_writes(tmp_path, monkeypatch):
+    """Hammer reads against writes; no read may ever fail."""
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    qc._write_cache({"updated_ts": time.time(), "keys": {}})
+
+    failures = []
+    stop = time.time() + 1.5
+
+    def reader():
+        while time.time() < stop:
+            try:
+                json.loads(qc._cache_path().read_text(encoding="utf-8"))
+            except Exception as exc:               # noqa: BLE001 - the assertion IS the point
+                failures.append(repr(exc))
+
+    payload = {"updated_ts": time.time(), "keys": {f"k{i}": {"status": "ok"} for i in range(3000)}}
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+
+    def writer():
+        while time.time() < stop:
+            qc._write_cache(payload)
+
+    threads.append(threading.Thread(target=writer))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert failures == [], f"torn reads observed: {failures[:3]}"
