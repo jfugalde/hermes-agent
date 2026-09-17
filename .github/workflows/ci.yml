@@ -1,4 +1,4 @@
-name: CI
+name: CI (fork syntax gate)
 
 # Minimal CI for this personal fork. The upstream orchestrator (detect ->
 # tests x8, lint, js, e2e-desktop, docs, docker, supply-chain, osv, review
@@ -18,7 +18,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Distinct from ci.yaml's `ci-${{ github.ref }}`. Both workflows are named
+  # "CI"; sharing a concurrency group made them cancel each other on every
+  # push, so this fork's syntax check never completed (it always showed as a
+  # cancelled/failed check). Keep this group unique to this file.
+  group: ci-fork-syntax-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
