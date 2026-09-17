@@ -98,6 +98,12 @@ STATUS_AT_RISK = "at_risk"  # crossed threshold but not exhausted — skip only 
 STATUS_EXHAUSTED = "exhausted"  # usage >= 1.0 — always skip
 
 _refresh_lock = threading.Lock()
+# Compare-and-set guard so only ONE refresh is ever in flight per process.
+# _refresh_lock alone only SERIALIZES refreshes — it does not collapse them:
+# N threads that all observe a stale cache will each queue on the lock and each
+# fire a network probe in turn. The pool calls this from its per-request hot
+# path, so under concurrency that is a thundering herd of redundant probes.
+_refresh_in_flight = False
 
 
 def _hermes_home() -> Path:
@@ -291,15 +297,48 @@ def maybe_refresh_in_background() -> None:
 
     Safe to call from the pool hot path: the staleness check is a cheap local
     file read, and the actual network refresh runs on a daemon thread so the
-    caller never blocks. The module-level ``_refresh_lock`` dedupes concurrent
-    refreshes, and the daemon thread is discarded on process exit.
+    caller never blocks.
+
+    At most ONE refresh is in flight per process at a time. The in-flight flag
+    is set under the same lock that guards the staleness decision, so a burst of
+    concurrent callers (the pool selecting a credential on every request) spawns
+    exactly one thread; the rest observe the flag and return. Without this,
+    ``_refresh_lock`` would only serialize the refreshes — each caller would
+    still fire its own redundant network probe, one after another.
+
+    The flag is cleared by a ``finally`` in the worker so a failed refresh
+    cannot wedge refreshes permanently. The thread is a daemon, discarded on
+    process exit.
     """
+    global _refresh_in_flight
     try:
-        if not _cache_stale(_read_cache()):
-            return
+        with _refresh_lock:
+            if _refresh_in_flight:
+                return
+            if not _cache_stale(_read_cache()):
+                return
+            _refresh_in_flight = True
     except Exception:
         return
-    threading.Thread(target=refresh_cache, daemon=True).start()
+
+    def _run() -> None:
+        global _refresh_in_flight
+        try:
+            refresh_cache()
+        except Exception:
+            # A background refresh failure must never surface as an unhandled
+            # thread exception (it would land in logs as a bare traceback).
+            # The reactive 429 rotation backstops a refresh that never landed,
+            # and the cache keeps its previous contents.
+            pass
+        finally:
+            _refresh_in_flight = False
+
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        # Thread spawn failed — release the flag so a later call can retry.
+        _refresh_in_flight = False
 
 
 def get_ollama_key_status() -> dict[str, str]:

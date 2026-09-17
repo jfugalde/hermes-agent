@@ -17,6 +17,25 @@ def _write_cache(tmp_path, payload: dict) -> None:
     (cache_dir / qc.CACHE_FILENAME).write_text(json.dumps(payload))
 
 
+@pytest.fixture(autouse=True)
+def _reset_refresh_state():
+    """Isolate the module-level in-flight flag between tests.
+
+    maybe_refresh_in_background() guards a process-global, and a daemon thread
+    spawned by one test can still be in flight when the next begins (it may even
+    hold _refresh_lock during a real network call if a monkeypatch was unwound
+    mid-flight). Without this reset, tests leak state into each other.
+    """
+    qc._refresh_in_flight = False
+    yield
+    # Give any in-flight worker a bounded chance to release, then force it.
+    for _ in range(50):
+        if not qc._refresh_in_flight:
+            break
+        time.sleep(0.1)
+    qc._refresh_in_flight = False
+
+
 def _snapshot(keys: dict) -> dict:
     return {"updated_ts": datetime.now(timezone.utc).timestamp(), "keys": keys}
 
@@ -156,3 +175,74 @@ def test_fetch_usage_parses_windows(monkeypatch):
     monkeypatch.setattr(qc.urllib.request, "urlopen", FakeUrlopen())
     usage = qc._fetch_usage("fake-key")
     assert usage == {"weekly": 0.073, "session": 0.178}
+
+
+def test_concurrent_refresh_calls_are_coalesced(tmp_path, monkeypatch):
+    """A burst of concurrent stale-cache checks must fire exactly ONE refresh.
+
+    The pool calls maybe_refresh_in_background() from its per-request hot path.
+    _refresh_lock alone only SERIALIZES refreshes, so before the in-flight guard
+    every concurrent caller queued on the lock and fired its own network probe —
+    a thundering herd. Regression guard for that bug.
+    """
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_cache(tmp_path, {                      # genuinely stale
+        "updated_ts": time.time() - qc.CACHE_TTL_SECONDS - 10,
+        "keys": {},
+    })
+
+    probes = []
+    lock = threading.Lock()
+
+    def slow_fetch(_secret):                      # simulate network latency
+        with lock:
+            probes.append(1)
+        time.sleep(0.25)
+        return {"weekly": 0.01, "session": 0.01}
+
+    monkeypatch.setattr(qc, "_load_env_keys", lambda: {"OLLAMA_API_KEY": "k" * 57})
+    monkeypatch.setattr(qc, "_fetch_usage", slow_fetch)
+    # _write_cache is left real so the refresh actually makes the cache fresh.
+
+    threads = [threading.Thread(target=qc.maybe_refresh_in_background) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for _ in range(60):                           # bounded wait for the worker
+        if not qc._refresh_in_flight:
+            break
+        time.sleep(0.1)
+
+    assert len(probes) == 1, f"expected 1 coalesced refresh, got {len(probes)}"
+    assert not qc._cache_stale(qc._read_cache()), "refresh should have left a fresh cache"
+    assert qc._refresh_in_flight is False, "in-flight flag must be released"
+
+
+def test_refresh_flag_released_after_failure(tmp_path, monkeypatch):
+    """A failing refresh must not wedge the in-flight flag permanently."""
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_cache(tmp_path, {
+        "updated_ts": time.time() - qc.CACHE_TTL_SECONDS - 10,
+        "keys": {},
+    })
+
+    def boom(_secret):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(qc, "_load_env_keys", lambda: {"OLLAMA_API_KEY": "k" * 57})
+    monkeypatch.setattr(qc, "_fetch_usage", boom)
+    # refresh_cache tolerates a failing key; force the whole refresh to raise.
+    monkeypatch.setattr(qc, "_write_cache", lambda snap: (_ for _ in ()).throw(RuntimeError("disk")))
+
+    threading.Thread(target=qc.maybe_refresh_in_background).start()
+    for _ in range(60):                           # bounded wait for the worker
+        if not qc._refresh_in_flight:
+            break
+        time.sleep(0.1)
+
+    assert qc._refresh_in_flight is False, "flag must be cleared even when the refresh raises"

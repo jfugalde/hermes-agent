@@ -1882,7 +1882,7 @@ def render_budget_section(
         "model=auto picks dynamically — good for: delegation, coding agents, worktrees.")
     lines.append("")
 
-   # ── Ollama Cloud ─────────────────────────────────────────────────────────
+    # ── Ollama Cloud ─────────────────────────────────────────────────────────
     oll_cfg = BUDGET_CONFIG["ollama-cloud"]
     oll_data = mtd.get("ollama-cloud", {})
     oll_rate = daily_rate.get("ollama-cloud", {})
