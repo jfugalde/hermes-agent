@@ -22,6 +22,19 @@ from agent.credential_persistence import (
     is_borrowed_credential_source,
     sanitize_borrowed_credential_payload,
 )
+# Proactive Ollama Cloud quota lookup.  ``agent.ollama_quota_cache`` is
+# stdlib-only (no hermes imports), so this cannot create an import cycle with
+# the pool.  The pool uses it to skip a key whose quota is already spent
+# instead of paying a failed 429 request per exhausted key.  Any failure in
+# this module degrades to "everything OK", leaving the reactive 429 rotation
+# as the backstop.
+from agent.ollama_quota_cache import (
+    DEFAULT_QUOTA_THRESHOLD as _OLLAMA_DEFAULT_QUOTA_THRESHOLD,
+    STATUS_AT_RISK as OLLAMA_STATUS_AT_RISK,
+    STATUS_EXHAUSTED as OLLAMA_STATUS_EXHAUSTED,
+    STATUS_OK as OLLAMA_STATUS_OK,
+    get_ollama_key_status as _get_ollama_key_status,
+)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -2400,6 +2413,24 @@ class CredentialPool:
             # call site runs OUTSIDE the pool lock.
             self._refresh_entry(entry, force=False)
 
+    def _ollama_quota_threshold(self) -> float:
+        """Read the Ollama Cloud proactive-skip threshold from config.yaml.
+
+        Lives under ``tools.ollama.quota_threshold`` (a non-secret behavioral
+        setting, so config rather than env).  Falls back to the module default
+        when unset or unreadable.  Read once per selection; cheap.
+        """
+        try:
+            config = _load_config_safe() or {}
+            tools = config.get("tools") or {}
+            ollama_cfg = tools.get("ollama") or {}
+            raw = ollama_cfg.get("quota_threshold")
+            if raw is not None:
+                return float(raw)
+        except Exception:
+            pass
+        return _OLLAMA_DEFAULT_QUOTA_THRESHOLD
+
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False,
     ) -> Tuple[List[PooledCredential], List[tuple]]:
@@ -2429,12 +2460,55 @@ class CredentialPool:
         sole_credential = sum(
             1 for e in self._entries if e.last_status != STATUS_DEAD
         ) <= 1
+        # Proactive Ollama Cloud quota skip.  Consult the daily quota cache
+        # ONCE per selection so a key whose metered window is already spent is
+        # never selected in the first place, instead of paying a failed 429
+        # request per exhausted key and burning a full cooldown on a key the
+        # account has no quota left for.  The cache helper is a local file read
+        # all day and only hits the network once per UTC day.  It returns
+        # everything-OK on any failure, so the reactive 429 rotation remains
+        # the backstop.
+        #
+        # Status semantics:
+        #   EXHAUSTED (usage >= 1.0): always skip — there is no quota left, so
+        #     selecting it guarantees a 429.
+        #   AT_RISK (threshold <= usage < 1.0): skip ONLY when another usable
+        #     key exists.  If this is the last usable credential, keep it, so a
+        #     single-key setup (or a nearly-depleted only key) still works
+        #     instead of returning None with quota still remaining.
+        ollama_status: Dict[str, str] = {}
+        if self.provider == "ollama-cloud":
+            ollama_status = _get_ollama_key_status(self._ollama_quota_threshold())
+        # An at-risk env key is only skippable when a STRICTLY healthier env key
+        # (STATUS_OK) exists.  Counting at-risk keys as "usable" here was wrong:
+        # with two at-risk keys each was skipped on account of the other,
+        # leaving `available` empty and select() returning None — a hard outage
+        # while BOTH keys still had quota left (usage in [threshold, 1.0)).
+        # Env-exhausted keys never count, so a pool whose other key is spent
+        # still serves from this one.
+        healthier_env_count = sum(
+            1 for e in self._entries
+            if e.source.startswith("env:")
+            and ollama_status.get(e.source.split(":", 1)[1]) == OLLAMA_STATUS_OK
+        )
+        can_skip_at_risk = healthier_env_count > 0
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load.  A stale duplicate row
             # can remain unhydrated; never lease or select it as an empty key.
             if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
                 continue
+            # Skip an Ollama Cloud key whose metered quota is already spent (or
+            # nearly so, when a healthier key exists) and select the next one.
+            # Checked before the cooldown logic below so a spent account never
+            # gets handed out at all.
+            if ollama_status and entry.source.startswith("env:"):
+                _env_name = entry.source.split(":", 1)[1]
+                _quota_status = ollama_status.get(_env_name)
+                if _quota_status == OLLAMA_STATUS_EXHAUSTED:
+                    continue
+                if _quota_status == OLLAMA_STATUS_AT_RISK and can_skip_at_risk:
+                    continue
             # For anthropic claude_code entries, sync from the credentials file
             # before any status/refresh checks. This picks up tokens refreshed
             # by other processes (Claude Code CLI, other Hermes profiles).
