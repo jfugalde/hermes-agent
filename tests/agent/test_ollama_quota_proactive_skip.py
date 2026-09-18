@@ -223,3 +223,62 @@ def test_non_ollama_provider_never_consults_quota(tmp_path, monkeypatch):
     pool = cp.load_pool("openrouter")
     pool._available_entries()
     assert calls["n"] == 0
+
+
+def test_two_at_risk_keys_still_serve_one(tmp_path, monkeypatch):
+    """Two AT-RISK keys must not eliminate each other.
+
+    Regression: ``can_skip_at_risk`` counted AT_RISK keys as "usable" when
+    deciding whether an at-risk key may be skipped, while the loop then skipped
+    AT_RISK keys.  With both keys at-risk each was skipped on account of the
+    other, ``available`` came back empty and ``select()`` returned None — a
+    hard outage while BOTH keys still had quota left (usage in
+    [threshold, 1.0)).  Only a strictly healthier (STATUS_OK) sibling may
+    justify skipping an at-risk key.
+    """
+    _patch_status(
+        monkeypatch,
+        {"OLLAMA_API_KEY": "at_risk", "OLLAMA_API_KEY_FALLBACK": "at_risk"},
+    )
+    pool = _load_pool(
+        tmp_path,
+        monkeypatch,
+        [
+            _env_entry("cred-primary", "OLLAMA_API_KEY", priority=0),
+            _env_entry("cred-fallback", "OLLAMA_API_KEY_FALLBACK", priority=1),
+        ],
+    )
+    avail, _pending = pool._available_entries()
+    assert avail, "both keys at-risk must not empty the pool"
+    assert pool.select() is not None
+
+
+def test_at_risk_skipped_only_for_a_healthy_sibling(tmp_path, monkeypatch):
+    """An at-risk key yields only to a STATUS_OK key, never to another at-risk.
+
+    Exhausted siblings must not count as healthier either — otherwise a spent
+    partner key would hide the at-risk one and empty the pool.
+    """
+    # at-risk + exhausted -> the at-risk key is the best available, keep it.
+    _patch_status(
+        monkeypatch,
+        {"OLLAMA_API_KEY": "exhausted", "OLLAMA_API_KEY_FALLBACK": "at_risk"},
+    )
+    pool = _load_pool(
+        tmp_path,
+        monkeypatch,
+        [
+            _env_entry("cred-primary", "OLLAMA_API_KEY", priority=0),
+            _env_entry("cred-fallback", "OLLAMA_API_KEY_FALLBACK", priority=1),
+        ],
+    )
+    avail, _pending = pool._available_entries()
+    assert [e.label for e in avail] == ["OLLAMA_API_KEY_FALLBACK"]
+
+    # at-risk + ok -> yield the at-risk key to the healthy one.
+    _patch_status(
+        monkeypatch,
+        {"OLLAMA_API_KEY": "at_risk", "OLLAMA_API_KEY_FALLBACK": "ok"},
+    )
+    avail2, _p2 = pool._available_entries()
+    assert [e.label for e in avail2] == ["OLLAMA_API_KEY_FALLBACK"]

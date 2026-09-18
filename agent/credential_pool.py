@@ -2479,16 +2479,19 @@ class CredentialPool:
         ollama_status: Dict[str, str] = {}
         if self.provider == "ollama-cloud":
             ollama_status = _get_ollama_key_status(self._ollama_quota_threshold())
-        # An at-risk env key is only skippable when at least one OTHER env key
-        # is usable (OK or at-risk).  Env-exhausted keys never count as usable,
-        # so a two-key pool whose other key is spent still serves from this one.
-        usable_env_count = sum(
+        # An at-risk env key is only skippable when a STRICTLY healthier env key
+        # (STATUS_OK) exists.  Counting at-risk keys as "usable" here was wrong:
+        # with two at-risk keys each was skipped on account of the other,
+        # leaving `available` empty and select() returning None — a hard outage
+        # while BOTH keys still had quota left (usage in [threshold, 1.0)).
+        # Env-exhausted keys never count, so a pool whose other key is spent
+        # still serves from this one.
+        healthier_env_count = sum(
             1 for e in self._entries
             if e.source.startswith("env:")
-            and ollama_status.get(e.source.split(":", 1)[1])
-            in (OLLAMA_STATUS_OK, OLLAMA_STATUS_AT_RISK)
+            and ollama_status.get(e.source.split(":", 1)[1]) == OLLAMA_STATUS_OK
         )
-        can_skip_at_risk = usable_env_count > 1
+        can_skip_at_risk = healthier_env_count > 0
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load.  A stale duplicate row
