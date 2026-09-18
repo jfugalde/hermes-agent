@@ -7,11 +7,16 @@ selected key returns 429 (quota exhausted), Hermes marks it and rotates to the
 next key. That works but pays the price of one failed request per exhausted key.
 
 This module makes the pool PROACTIVE. It maintains a small daily cache file
-mapping each OLLAMA_*_KEY env var -> its weekly quota usage (0..1). The pool
+mapping each OLLAMA_*_KEY env var -> its quota usage (0..1). The pool
 reads this file on the hot path (fast, local, no network). The file is
 refreshed once per UTC day — the "first request of the day" becomes the cache
 filler — so availability is decided from a local read for the rest of the day
 instead of a live API call per request.
+
+Ollama Cloud accounts do not share one quota shape: some meter a ``weekly``
+window, others only a ``monthly`` one. The recorded fraction is therefore the
+high-water mark across whichever buckets the account exposes, so a key that is
+out of its monthly quota is not mistaken for a fresh one.
 
 File location: $HERMES_HOME/cache/ollama-quota-daily.json
   HERMES_HOME defaults to ~/.hermes (same convention as the quota watchdog).
@@ -46,8 +51,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 USAGE_URL = "https://ollama.com/api/usage"
-# Switch away from a key once its weekly quota reaches this fraction consumed.
-# 0.95 = skip a key that has burned 95% of its weekly quota.
+# Switch away from a key once its quota reaches this fraction consumed.
+# 0.95 = skip a key that has burned 95% of its metered quota window.
 DEFAULT_QUOTA_THRESHOLD = 0.95
 CACHE_FILENAME = "ollama-quota-daily.json"
 
@@ -112,16 +117,40 @@ def _load_env_keys() -> dict[str, str]:
 
 
 def _fetch_usage(key: str) -> float:
-    """Live query of weekly quota fraction (0..1) for one key."""
+    """Live query of quota fraction (0..1) for one key.
+
+    Ollama Cloud keys are not all on the same plan: some accounts meter a
+    ``weekly`` window, others only a ``monthly`` one, and some expose both.
+    Reading a single bucket silently reports 0.0 for every key that does not
+    use it — an account already out of monthly quota then looks pristine and
+    the pool keeps selecting it.
+
+    So take the highest consumption across the buckets the response actually
+    carries: the binding constraint is whichever window is closest to its cap.
+    A missing bucket contributes nothing; an absent/empty ``limits`` object
+    leaves the key at 0.0 (treated as healthy, with the reactive 429 rotation
+    as the backstop).
+    """
     req = urllib.request.Request(
         USAGE_URL,
         headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode())
-    weekly = (data.get("limits") or {}).get("weekly") or {}
-    usage = weekly.get("usage")
-    return float(usage) if usage is not None else 0.0
+    limits = data.get("limits") or {}
+    highest = 0.0
+    for bucket in ("weekly", "monthly", "session"):
+        entry = limits.get(bucket)
+        if not isinstance(entry, dict):
+            continue
+        usage = entry.get("usage")
+        if usage is None:
+            continue
+        try:
+            highest = max(highest, float(usage))
+        except (TypeError, ValueError):
+            continue
+    return highest
 
 
 def _read_cache() -> dict | None:

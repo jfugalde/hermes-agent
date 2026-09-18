@@ -28,6 +28,19 @@ from agent.credential_persistence import (
     is_borrowed_credential_source,
     sanitize_borrowed_credential_payload,
 )
+# Proactive Ollama Cloud quota lookup.  ``agent.ollama_quota_cache`` is
+# stdlib-only (no hermes imports), so this cannot create an import cycle with
+# the pool.  The pool uses it to skip a key whose quota is already spent
+# instead of paying a failed 429 request per exhausted key.  Any failure in
+# this module degrades to "everything OK", leaving the reactive 429 rotation
+# as the backstop.
+from agent.ollama_quota_cache import (
+    DEFAULT_QUOTA_THRESHOLD as _OLLAMA_DEFAULT_QUOTA_THRESHOLD,
+    STATUS_AT_RISK as OLLAMA_STATUS_AT_RISK,
+    STATUS_EXHAUSTED as OLLAMA_STATUS_EXHAUSTED,
+    STATUS_OK as OLLAMA_STATUS_OK,
+    get_ollama_key_status as _get_ollama_key_status,
+)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -1995,6 +2008,24 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         if self.provider == "nous":
             return self._sync_nous_entry_from_auth_store(entry)
         return self._sync_entry_from_auth_store(entry)
+    def _ollama_quota_threshold(self) -> float:
+        """Read the Ollama Cloud proactive-skip threshold from config.yaml.
+
+        Lives under ``tools.ollama.quota_threshold`` (a non-secret behavioral
+        setting, so config rather than env).  Falls back to the module default
+        when unset or unreadable.  Read once per selection; cheap.
+        """
+        try:
+            config = _load_config_safe() or {}
+            tools = config.get("tools") or {}
+            ollama_cfg = tools.get("ollama") or {}
+            raw = ollama_cfg.get("quota_threshold")
+            if raw is not None:
+                return float(raw)
+        except Exception:
+            pass
+        return _OLLAMA_DEFAULT_QUOTA_THRESHOLD
+
 
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False, model: Optional[str] = None,
@@ -2014,6 +2045,15 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         available: List[PooledCredential] = []
         pending_refresh: List[PooledCredential] = []
         sole_credential = self._is_sole_credential()
+        ollama_status: Dict[str, str] = {}
+        if self.provider == "ollama-cloud":
+            ollama_status = _get_ollama_key_status(self._ollama_quota_threshold())
+        healthier_env_count = sum(
+            1 for e in self._entries
+            if e.source.startswith("env:")
+            and ollama_status.get(e.source.split(":", 1)[1]) == OLLAMA_STATUS_OK
+        )
+        can_skip_at_risk = healthier_env_count > 0
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load; never lease an
@@ -2024,6 +2064,13 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if synced is not entry:
                 entry = synced
                 cleared_any = True
+            if ollama_status and entry.source.startswith("env:"):
+                _env_name = entry.source.split(":", 1)[1]
+                _quota_status = ollama_status.get(_env_name)
+                if _quota_status == OLLAMA_STATUS_EXHAUSTED:
+                    continue
+                if _quota_status == OLLAMA_STATUS_AT_RISK and can_skip_at_risk:
+                    continue
             if entry.last_status == STATUS_DEAD:
                 # Manual DEAD credentials are pruned after a 24h quiet window;
                 # singleton-seeded ones stay (audit trail, and the seeder would
