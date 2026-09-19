@@ -282,3 +282,55 @@ def test_at_risk_skipped_only_for_a_healthy_sibling(tmp_path, monkeypatch):
     )
     avail2, _p2 = pool._available_entries()
     assert [e.label for e in avail2] == ["OLLAMA_API_KEY_FALLBACK"]
+
+
+def test_cache_write_is_atomic_under_concurrent_readers(tmp_path, monkeypatch):
+    """A concurrent reader must never observe a partial/empty cache file.
+
+    Pins the invariant, not a counter: while one thread keeps replacing the
+    cache, every concurrent reader gets either a parseable snapshot or no file
+    at all -- never a truncated one. The pre-fix ``path.write_text()`` truncates
+    before writing, so readers hit empty/partial content and raise
+    ``json.JSONDecodeError``; this test fails on that implementation and passes
+    on the atomic ``os.replace`` one.
+    """
+    import threading
+
+    from agent import ollama_quota_cache as qc
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    path = qc._cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"keys": {"OLLAMA_API_KEY": "ok"}}), encoding="utf-8")
+
+    torn: list[str] = []
+    stop = threading.Event()
+
+    def writer() -> None:
+        payload = {"keys": {f"K{i}": {"usage": 0.1 * (i % 9)} for i in range(200)}}
+        while not stop.is_set():
+            qc._write_cache(payload)
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                torn.append(str(exc))
+            except FileNotFoundError:
+                # os.replace() swaps atomically; a briefly-absent path is a
+                # legitimate race outcome, a CORRUPT read is not.
+                pass
+
+    threads = [threading.Thread(target=writer)] + [
+        threading.Thread(target=reader) for _ in range(4)
+    ]
+    for t in threads:
+        t.daemon = True
+        t.start()
+    time.sleep(2)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert torn == [], f"cache readers observed {len(torn)} torn reads: {torn[:3]}"
