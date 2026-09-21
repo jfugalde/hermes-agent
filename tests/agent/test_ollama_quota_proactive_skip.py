@@ -115,6 +115,39 @@ def test_fetch_usage_absent_limits_is_zero(monkeypatch):
     assert qc._fetch_usage("sk-anything") == 0.0
 
 
+def test_fetch_usage_ignores_session_bucket(monkeypatch):
+    """The 6-hour rolling ``session`` window must NOT count as quota.
+
+    Regression: ``session`` is Ollama Cloud's 6-hour rolling window, which
+    self-heals on a 6h cycle. Caching it in the DAILY quota cache would skip
+    the primary key for up to 24h on a window that already rolled over,
+    defeating the "prefer primary, return on reset" failover policy. Only the
+    long-horizon ``weekly``/``monthly`` windows may drive proactive skip; the
+    6h window is left to the reactive 429 rotation.
+    """
+    from agent import ollama_quota_cache as qc
+
+    payload = {
+        "limits": {
+            "weekly": {"usage": 0.10},
+            "session": {"usage": 0.95},  # near-cap on the 6h window — must be ignored
+        }
+    }
+
+    class _Resp:
+        def read(self_inner):
+            return json.dumps(payload).encode()
+
+        def __enter__(self_inner):
+            return self_inner
+
+        def __exit__(self_inner, *a):
+            return False
+
+    monkeypatch.setattr(qc.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert qc._fetch_usage("sk-anything") == pytest.approx(0.10)
+
+
 # --- _available_entries: proactive skip -----------------------------------------
 
 

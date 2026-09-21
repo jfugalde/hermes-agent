@@ -139,7 +139,13 @@ def _fetch_usage(key: str) -> float:
         data = json.loads(resp.read().decode())
     limits = data.get("limits") or {}
     highest = 0.0
-    for bucket in ("weekly", "monthly", "session"):
+    # Only the LONG-HORIZON quota windows drive proactive skip. ``session`` is
+    # Ollama Cloud's 6-hour rolling window — it self-heals on a 6h cycle, far
+    # shorter than this cache's daily TTL. Recording it here would skip a key
+    # for up to 24h on a window that already rolled over, defeating the
+    # "prefer primary, return on reset" policy. The 6h window is instead left
+    # to the reactive 429 rotation (bench the key briefly, retry next hour).
+    for bucket in ("weekly", "monthly"):
         entry = limits.get(bucket)
         if not isinstance(entry, dict):
             continue
