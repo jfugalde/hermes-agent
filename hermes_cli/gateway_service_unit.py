@@ -332,6 +332,16 @@ def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
     if not unit_path.exists():
         return False
 
+    # Homelab wrappers (infrastructure/scripts/*-gateway-run.sh) inject Telegram
+    # tokens from 1Password. Native refresh would rewrite ExecStart to bare
+    # python and drop Telegram on the next restart.
+    try:
+        installed_text = unit_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if "gateway-run.sh" in installed_text:
+        return False
+
     # _gw().systemd_unit_is_current is the HERMES_HOME-sync chokepoint; its env mutation persists for the regenerate below.
     if _gw().systemd_unit_is_current(system=system):
         return False
