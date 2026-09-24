@@ -18,7 +18,10 @@ def test_session_usage_limit_sets_six_hour_reset(monkeypatch):
     monkeypatch.setattr("agent.credential_pool.time.time", lambda: 1_000_000.0)
 
     normalized = _normalize_error_context({
-        "message": "you (example) have reached your session usage limit",
+        "message": (
+            "you (example) have reached your session usage limit, "
+            "upgrade for higher limits: https://ollama.com/upgrade"
+        ),
     })
 
     assert normalized["reset_at"] == 1_000_000.0 + 6 * 60 * 60
@@ -27,6 +30,13 @@ def test_session_usage_limit_sets_six_hour_reset(monkeypatch):
 def test_other_billing_text_does_not_invent_a_reset():
     normalized = _normalize_error_context({
         "message": "insufficient credits",
+    })
+    assert "reset_at" not in normalized
+
+
+def test_session_phrase_without_ollama_host_does_not_stamp_six_hours():
+    normalized = _normalize_error_context({
+        "message": "you have reached your session usage limit",
     })
     assert "reset_at" not in normalized
 

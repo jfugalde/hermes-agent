@@ -197,6 +197,13 @@ def refresh_agent_fallback_chain(agent: Any) -> list | None:
         chain = load_fallback_chain_for_path(cfg_path)
     except Exception:
         return list(getattr(agent, "_fallback_chain", []) or []) or None
+    held = (
+        getattr(agent, "_fallback_activated", False)
+        and (getattr(agent, "_rate_limited_until", 0) or 0) > time.monotonic()
+    )
     apply_fallback_chain_to_agent(agent, chain)
-    agent._fallback_chain_stamp = stamp
+    # A cooldown skip leaves the in-use chain in place. Do not stamp that
+    # read, or the next turn treats the file as unchanged and never applies it.
+    if not held:
+        agent._fallback_chain_stamp = stamp
     return chain

@@ -79,6 +79,34 @@ def test_refresh_skips_parse_when_mtime_unchanged(monkeypatch):
     assert agent._fallback_chain[0]["model"] == "deepseek-v4.1-flash"
 
 
+def test_refresh_does_not_stamp_while_cooldown_holds_the_chain(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.get_config_path",
+        lambda: SimpleNamespace(
+            exists=lambda: True,
+            stat=lambda: SimpleNamespace(st_mtime_ns=11, st_size=4),
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.read_user_config_raw",
+        lambda *_a, **_k: {
+            "fallback_providers": [
+                {"provider": "ollama-cloud", "model": "deepseek-v4.1-flash"},
+            ]
+        },
+    )
+    agent = SimpleNamespace(
+        _fallback_chain=[{"provider": "ollama-cloud", "model": "gemma4:31b"}],
+        _fallback_model={"provider": "ollama-cloud", "model": "gemma4:31b"},
+        _fallback_index=1,
+        _fallback_activated=True,
+        _rate_limited_until=10**12,
+    )
+    refresh_agent_fallback_chain(agent)
+    assert agent._fallback_chain[0]["model"] == "gemma4:31b"
+    assert not hasattr(agent, "_fallback_chain_stamp")
+
+
 def test_refresh_keeps_chain_while_fallback_cooldown_holds():
     live = [{"provider": "cursor-go", "model": "gpt-5.4-nano-low"}]
     agent = SimpleNamespace(
