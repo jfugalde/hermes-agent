@@ -2371,6 +2371,20 @@ def switch_model(
             if not api_key:
                 api_key = "no-key-required"
 
+    # Same-provider model switch keeps the credential already in use.
+    # resolve_runtime_provider / pool.select() prefer priority 0 (the
+    # primary key). A session that already rotated to the fallback key
+    # would otherwise send the next request on the exhausted primary,
+    # 429, and re-enter the model fallback chain.
+    _session_key = (current_api_key or "").strip()
+    if (
+        not provider_changed
+        and _session_key
+        and _session_key != "no-key-required"
+        and _may_reuse_session_credential(current_base_url, base_url)
+    ):
+        api_key = _session_key
+
     # --- Resolve api_mode from the final (provider, base_url) before validation ---
     # Two cases this closes, both surfaced when the switched model's reasoning
     # is actually applied (post the reasoning-unification refactor):
