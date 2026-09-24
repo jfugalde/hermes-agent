@@ -455,6 +455,17 @@ def _normalize_error_context(error_context: Optional[Dict[str, Any]]) -> Dict[st
         retry_delay_seconds = _extract_retry_delay_seconds(message)
         if retry_delay_seconds is not None:
             parsed_reset_at = time.time() + retry_delay_seconds
+    # Ollama's session cap is 6 hours and the body carries no reset time.
+    # Require the ollama.com host so another provider's "session usage
+    # limit" text does not inherit this window. Without the stamp, the
+    # entry is benched for the 1h 429 TTL and the next turn probes it again.
+    if (
+        parsed_reset_at is None
+        and isinstance(message, str)
+        and "session usage limit" in message.lower()
+        and "ollama.com" in message.lower()
+    ):
+        parsed_reset_at = time.time() + 6 * 60 * 60
     if parsed_reset_at is not None:
         normalized["reset_at"] = parsed_reset_at
     return normalized
