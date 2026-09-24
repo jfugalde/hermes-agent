@@ -2098,6 +2098,18 @@ def run_conversation(
     except Exception:
         logger.debug("per-turn env credential refresh failed", exc_info=True)
 
+    # Long-lived CLI sessions freeze fallback_providers at process start.
+    # Re-read the chain every turn so a config edit recovers without killing
+    # the session. Pool attach stays on the 429 path (ensure_credential_pool
+    # inside recover_with_credential_pool), after primary restore, so a turn
+    # still sitting on a fallback provider does not load that pool first.
+    try:
+        from hermes_cli.fallback_config import refresh_agent_fallback_chain
+
+        refresh_agent_fallback_chain(agent)
+    except Exception:
+        logger.debug("per-turn fallback chain refresh failed", exc_info=True)
+
     # ── Per-turn setup (the prologue) ──
     # All once-per-turn setup — stdio guarding, retry-counter resets, user
     # message sanitization, todo/nudge hydration, system-prompt restore-or-

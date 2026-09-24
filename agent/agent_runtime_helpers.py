@@ -1088,6 +1088,40 @@ def sync_credential_pool_entry_id(agent) -> None:
         agent._credential_pool_entry_id = None
 
 
+def ensure_credential_pool(agent):
+    """Attach the provider's credential pool when the agent was built without one.
+
+    CLI sessions and in-place model switches can leave ``_credential_pool``
+    empty. A quota 429 then skips key rotation and walks ``fallback_providers``,
+    which changes the model. Loading the pool here lets recovery stay on the
+    current model and use the next key.
+    """
+    pool = getattr(agent, "_credential_pool", None)
+    if pool is not None:
+        return pool
+    provider = (getattr(agent, "provider", "") or "").strip()
+    if not provider:
+        return None
+    try:
+        from agent.credential_pool import load_pool
+
+        loaded = load_pool(provider)
+    except Exception:
+        _ra().logger.debug(
+            "credential pool attach failed for %s", provider, exc_info=True,
+        )
+        return None
+    if loaded is None or not loaded.has_credentials():
+        return None
+    agent._credential_pool = loaded
+    _ra().logger.info(
+        "credential pool was missing on %s — attached %d entries for recovery",
+        provider,
+        len(loaded.entries()) if hasattr(loaded, "entries") else 0,
+    )
+    return loaded
+
+
 def recover_with_credential_pool(
     agent,
     *,
@@ -1117,7 +1151,9 @@ def recover_with_credential_pool(
     instead of the one-hour billing bench — the same 400 can be a
     content-filter rejection that leaves the credential healthy.
     """
-    pool = agent._credential_pool
+    pool = getattr(agent, "_credential_pool", None)
+    if pool is None:
+        pool = ensure_credential_pool(agent)
     if pool is None:
         return False, has_retried_429
 
@@ -5313,6 +5349,7 @@ __all__ = [
     "sanitize_tool_call_arguments",
     "repair_message_sequence",
     "strip_think_blocks",
+    "ensure_credential_pool",
     "recover_with_credential_pool",
     "try_recover_primary_transport",
     "drop_thinking_only_and_merge_users",

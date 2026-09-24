@@ -10929,73 +10929,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         that genuinely lacks the key clears the chain.
         """
         try:
-            from hermes_cli.config import read_user_config_raw
+            from hermes_cli.fallback_config import load_fallback_chain_for_path
+
             cfg_path = _hermes_home / "config.yaml"
-            if not cfg_path.exists():
-                self._fallback_model = None
-                return self._fallback_model
-            # Raw primitive (raises on parse failure) is required here: the
-            # canonical fail-open loader would return {} on a torn mid-edit
-            # write and WIPE the last known-good chain. The overlay/expansion
-            # below fixes the managed-scope/${VAR} drift without losing that.
-            cfg = read_user_config_raw(cfg_path)
-            try:
-                from hermes_cli import managed_scope
-                cfg = managed_scope.apply_managed_overlay(cfg)
-            except Exception:
-                pass
-            try:
-                from hermes_cli.config import _expand_env_vars
-                expanded = _expand_env_vars(cfg)
-                if isinstance(expanded, dict):
-                    cfg = expanded
-            except Exception:
-                pass
+            # Shared mtime cache with the CLI turn refresh. A torn write
+            # raises and we keep the last known-good chain (#60955).
+            self._fallback_model = load_fallback_chain_for_path(cfg_path)
         except Exception:
-            # Transient failure — keep last known-good chain.
             logger.debug(
                 "fallback_providers refresh: config.yaml read failed; "
                 "keeping last known-good chain", exc_info=True,
             )
             return self._fallback_model
-        self._fallback_model = get_fallback_chain(cfg) or None
         return self._fallback_model
 
     @staticmethod
     def _apply_fallback_chain_to_agent(agent: Any, chain: list | None) -> None:
         """Keep a cached agent's fallback chain aligned with current config.
 
-        Skips rewrite while a cooldown is holding the agent on an already-
-        activated fallback provider — ``restore_primary_runtime`` owns that
-        turn-scoped lifecycle. When primary is active (or cooldown expired),
-        replace the chain so mid-uptime ``fallback_providers`` edits take
-        effect without requiring a gateway restart (#60955).
+        Delegates to ``hermes_cli.fallback_config.apply_fallback_chain_to_agent``
+        so the CLI per-turn refresh and the gateway cache share one write
+        (#60955).
         """
-        if agent is None:
-            return
-        new_chain = list(chain or [])
-        rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
-        if (
-            getattr(agent, "_fallback_activated", False)
-            and rate_limited_until > time.monotonic()
-        ):
-            return
-        old_chain = list(getattr(agent, "_fallback_chain", []) or [])
-        agent._fallback_chain = new_chain
-        agent._fallback_model = new_chain[0] if new_chain else None
-        if not getattr(agent, "_fallback_activated", False):
-            agent._fallback_index = 0
-        # A config edit signals the user changed something — drop the
-        # session-scoped unavailability memo so re-configured entries
-        # (e.g. credentials added mid-uptime for a previously-failing
-        # provider) get retried instead of staying suppressed for the
-        # cached agent's lifetime.  Only on actual content change, so
-        # the per-message no-op refresh keeps the memo's rate-limiting
-        # benefit (#60955).
-        if new_chain != old_chain:
-            unavailable = getattr(agent, "_unavailable_fallback_keys", None)
-            if unavailable:
-                unavailable.clear()
+        from hermes_cli.fallback_config import apply_fallback_chain_to_agent
+
+        apply_fallback_chain_to_agent(agent, chain)
 
     def _snapshot_running_agents(self) -> Dict[str, Any]:
         return {

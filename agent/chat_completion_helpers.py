@@ -2734,6 +2734,25 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     if not fb_provider or not fb_model:
         return agent._try_activate_fallback(reason)  # skip invalid, try next
 
+    # Ollama meters quota per key, not per model. A same-provider hop
+    # (glm-5.2 → gemma) spends the same exhausted key. Key rotation owns
+    # that failure. Only billing/quota takes this path: a plain rate_limit
+    # can be per-model, and a different provider is still the failover
+    # once every key for this one is spent.
+    current_provider = (getattr(agent, "provider", "") or "").strip().lower()
+    if (
+        reason == FailoverReason.billing
+        and fb_provider in {"ollama-cloud", "ollama"}
+        and fb_provider == current_provider
+    ):
+        logger.info(
+            "Fallback skip: %s/%s — Ollama quota is per key, not per model (current=%s)",
+            fb_provider,
+            fb_model,
+            getattr(agent, "model", "") or "?",
+        )
+        return agent._try_activate_fallback(reason)
+
     local_skip_reason = _fallback_entry_unavailable_without_network(agent, fb)
     if local_skip_reason:
         unavailable.add(fb_key)
