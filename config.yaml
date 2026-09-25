@@ -93,7 +93,7 @@ providers:
     name: Cursor (Go Adapter)
 fallback_providers:
   - provider: ollama-cloud
-    model: gemma4:31b
+    model: deepseek-v4.1-flash
   - provider: cursor-go
     model: gpt-5.4-nano-low
 toolsets: '["hermes-cli","web","kanban"]'
