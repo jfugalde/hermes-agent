@@ -5604,6 +5604,25 @@ class TestGpt5ApiModeRouting:
             agent.api_mode = "codex_responses"
         assert agent.api_mode == "chat_completions"
 
+    def test_cursor_go_gpt5_stays_on_chat_completions(self, agent):
+        """cursor-go-adapter has no /v1/responses — gpt-5* must stay on chat completions."""
+        agent.provider = "cursor-go"
+        agent.base_url = "http://127.0.0.1:9101/v1"
+        agent.api_mode = "chat_completions"
+        agent.model = "gpt-5.4-nano-low"
+        if (
+            agent.api_mode == "chat_completions"
+            and not agent._is_azure_openai_url()
+            and (
+                agent._is_direct_openai_url()
+                or agent._provider_model_requires_responses_api(
+                    agent.model, provider=agent.provider,
+                )
+            )
+        ):
+            agent.api_mode = "codex_responses"
+        assert agent.api_mode == "chat_completions"
+
     def test_is_azure_openai_url_detection(self, agent):
         assert agent._is_azure_openai_url("https://foo.openai.azure.com/openai/v1") is True
         assert agent._is_azure_openai_url("https://api.openai.com/v1") is False

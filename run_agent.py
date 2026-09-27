@@ -1770,6 +1770,11 @@ class AIAgent:
         # completions endpoint; its /v1/responses endpoint returns 404.
         if normalized_provider == "nous":
             return False
+        # cursor-go-adapter (:9101) speaks /v1/chat/completions only.
+        # Upgrading gpt-5* to Responses posts /v1/responses and the Go mux
+        # answers "404 page not found" before any completion runs.
+        if normalized_provider == "cursor-go":
+            return False
         if normalized_provider == "custom":
             # Generic custom endpoints are conservative by default. They may
             # relay GPT-5 models without full Responses semantics, so only
