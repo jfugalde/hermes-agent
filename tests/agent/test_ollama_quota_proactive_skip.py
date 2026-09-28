@@ -43,8 +43,36 @@ def _env_entry(cred_id: str, env_name: str, *, priority: int) -> dict:
     }
 
 
+_OLLAMA_ENV_VARS = (
+    "OLLAMA_API_KEY",
+    "OLLAMA_API_KEY_FALLBACK",
+    "OLLAMA_API_KEY_ATHENA",
+)
+
+
 def _load_pool(tmp_path, monkeypatch, entries: list[dict]):
+    """Load an isolated ollama-cloud pool for tests.
+
+    ``load_pool`` re-seeds ``env:*`` credentials from the process environment.
+    Real ``OLLAMA_*`` exports on a dev machine otherwise inject extra keys and
+    break single-key scenarios (e.g. sole at-risk primary).
+    """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    requested_env = {
+        e["source"].split(":", 1)[1]
+        for e in entries
+        if isinstance(e.get("source"), str) and e["source"].startswith("env:")
+    }
+    for env_var in _OLLAMA_ENV_VARS:
+        if env_var in requested_env:
+            token = next(
+                e.get("access_token", f"sk-test-{env_var}")
+                for e in entries
+                if e.get("source") == f"env:{env_var}"
+            )
+            monkeypatch.setenv(env_var, token)
+        else:
+            monkeypatch.delenv(env_var, raising=False)
     _write_auth_store(
         tmp_path,
         {"version": 1, "credential_pool": {"ollama-cloud": entries}},
@@ -315,6 +343,35 @@ def test_at_risk_skipped_only_for_a_healthy_sibling(tmp_path, monkeypatch):
     )
     avail2, _p2 = pool._available_entries()
     assert [e.label for e in avail2] == ["OLLAMA_API_KEY_FALLBACK"]
+
+
+def test_session_hold_on_quota_ok_key_does_not_hide_at_risk_fallback(tmp_path, monkeypatch):
+    """A 6h session hold must not count the primary as healthier.
+
+    Daily quota can still say OK while the session window has already 429'd.
+    Skipping the at-risk fallback because of that primary empties the pool
+    and the turn dies instead of rotating keys.
+    """
+    _patch_status(
+        monkeypatch,
+        {"OLLAMA_API_KEY": "ok", "OLLAMA_API_KEY_FALLBACK": "at_risk"},
+    )
+    primary = _env_entry("cred-primary", "OLLAMA_API_KEY", priority=0)
+    primary["last_status"] = "exhausted"
+    primary["last_status_at"] = time.time()
+    primary["last_error_code"] = 429
+    primary["last_error_reset_at"] = time.time() + 6 * 60 * 60
+    pool = _load_pool(
+        tmp_path,
+        monkeypatch,
+        [
+            primary,
+            _env_entry("cred-fallback", "OLLAMA_API_KEY_FALLBACK", priority=1),
+        ],
+    )
+    avail, _pending = pool._available_entries()
+    assert [e.label for e in avail] == ["OLLAMA_API_KEY_FALLBACK"]
+    assert pool.select().label == "OLLAMA_API_KEY_FALLBACK"
 
 
 def test_cache_write_is_atomic_under_concurrent_readers(tmp_path, monkeypatch):
