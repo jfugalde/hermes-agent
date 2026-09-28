@@ -43,8 +43,36 @@ def _env_entry(cred_id: str, env_name: str, *, priority: int) -> dict:
     }
 
 
+_OLLAMA_ENV_VARS = (
+    "OLLAMA_API_KEY",
+    "OLLAMA_API_KEY_FALLBACK",
+    "OLLAMA_API_KEY_ATHENA",
+)
+
+
 def _load_pool(tmp_path, monkeypatch, entries: list[dict]):
+    """Load an isolated ollama-cloud pool for tests.
+
+    ``load_pool`` re-seeds ``env:*`` credentials from the process environment.
+    Real ``OLLAMA_*`` exports on a dev machine otherwise inject extra keys and
+    break single-key scenarios (e.g. sole at-risk primary).
+    """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    requested_env = {
+        e["source"].split(":", 1)[1]
+        for e in entries
+        if isinstance(e.get("source"), str) and e["source"].startswith("env:")
+    }
+    for env_var in _OLLAMA_ENV_VARS:
+        if env_var in requested_env:
+            token = next(
+                e.get("access_token", f"sk-test-{env_var}")
+                for e in entries
+                if e.get("source") == f"env:{env_var}"
+            )
+            monkeypatch.setenv(env_var, token)
+        else:
+            monkeypatch.delenv(env_var, raising=False)
     _write_auth_store(
         tmp_path,
         {"version": 1, "credential_pool": {"ollama-cloud": entries}},
