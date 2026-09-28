@@ -2496,12 +2496,26 @@ class CredentialPool:
         # leaving `available` empty and select() returning None — a hard outage
         # while BOTH keys still had quota left (usage in [threshold, 1.0)).
         # Env-exhausted keys never count, so a pool whose other key is spent
-        # still serves from this one.
-        healthier_env_count = sum(
-            1 for e in self._entries
-            if e.source.startswith("env:")
-            and ollama_status.get(e.source.split(":", 1)[1]) == OLLAMA_STATUS_OK
-        )
+        # still serves from this one. A key whose daily quota is still OK but
+        # is on an unexpired cooldown (Ollama's 6h session window) is not
+        # healthier either — counting it skips the at-risk fallback and
+        # empties the pool.
+        def _quota_healthier(entry: PooledCredential) -> bool:
+            if not entry.source.startswith("env:"):
+                return False
+            if ollama_status.get(entry.source.split(":", 1)[1]) != OLLAMA_STATUS_OK:
+                return False
+            if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
+                return False
+            if entry.last_status == STATUS_DEAD:
+                return False
+            if entry.last_status == STATUS_EXHAUSTED:
+                held_until = _exhausted_until(entry, sole_credential=sole_credential)
+                if held_until is not None and now < held_until:
+                    return False
+            return True
+
+        healthier_env_count = sum(1 for e in self._entries if _quota_healthier(e))
         can_skip_at_risk = healthier_env_count > 0
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are

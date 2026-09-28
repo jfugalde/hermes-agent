@@ -317,6 +317,35 @@ def test_at_risk_skipped_only_for_a_healthy_sibling(tmp_path, monkeypatch):
     assert [e.label for e in avail2] == ["OLLAMA_API_KEY_FALLBACK"]
 
 
+def test_session_hold_on_quota_ok_key_does_not_hide_at_risk_fallback(tmp_path, monkeypatch):
+    """A 6h session hold must not count the primary as healthier.
+
+    Daily quota can still say OK while the session window has already 429'd.
+    Skipping the at-risk fallback because of that primary empties the pool
+    and the turn dies instead of rotating keys.
+    """
+    _patch_status(
+        monkeypatch,
+        {"OLLAMA_API_KEY": "ok", "OLLAMA_API_KEY_FALLBACK": "at_risk"},
+    )
+    primary = _env_entry("cred-primary", "OLLAMA_API_KEY", priority=0)
+    primary["last_status"] = "exhausted"
+    primary["last_status_at"] = time.time()
+    primary["last_error_code"] = 429
+    primary["last_error_reset_at"] = time.time() + 6 * 60 * 60
+    pool = _load_pool(
+        tmp_path,
+        monkeypatch,
+        [
+            primary,
+            _env_entry("cred-fallback", "OLLAMA_API_KEY_FALLBACK", priority=1),
+        ],
+    )
+    avail, _pending = pool._available_entries()
+    assert [e.label for e in avail] == ["OLLAMA_API_KEY_FALLBACK"]
+    assert pool.select().label == "OLLAMA_API_KEY_FALLBACK"
+
+
 def test_cache_write_is_atomic_under_concurrent_readers(tmp_path, monkeypatch):
     """A concurrent reader must never observe a partial/empty cache file.
 
