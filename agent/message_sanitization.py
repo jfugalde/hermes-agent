@@ -558,7 +558,11 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
             old = _tc_field(tc, "id")
             _tc_set(tc, "id", f"{new_id}|{old.split('|', 1)[1]}" if isinstance(old, str) and "|" in old else new_id)
             if _tc_field(tc, "call_id"):
-                _tc_set(tc, "call_id", new_id)
+                # Update provider_data explicitly since call_id is a read-only property on ToolCall objects.
+                if isinstance(tc, dict):
+                    tc["call_id"] = new_id
+                elif hasattr(tc, "provider_data") and tc.provider_data is not None:
+                    tc.provider_data["call_id"] = new_id
         except Exception:
             logger.warning("Could not uniquify duplicate tool call id %s", cid)
             continue
