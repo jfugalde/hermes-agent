@@ -151,7 +151,7 @@ from agent.reasoning_params import ReasoningParamsMixin
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
 from agent.session_activity import ActivityProvenance
 from agent.model_metadata import is_local_endpoint
-from agent.message_sanitization import (
+from agent.message_sanitization import (coalesce_tool_call_id, 
     coalesce_tool_call_id as _sanitize_coalesce_tool_call_id,
     deterministic_call_id as _codex_deterministic_call_id,
     uniquify_tool_call_ids as _sanitize_uniquify_tool_call_ids,
@@ -1221,18 +1221,25 @@ class AIAgent(
     def _deduplicate_tool_calls(tool_calls: list) -> list:
         """Drop duplicate (tool_name, arguments) pairs in one turn (first wins). Valid JSON arguments are
         canonicalized so key order/whitespace can't evade dedup; returns the original list when nothing was removed."""
-        seen, unique = set(), []
+        seen_keys, seen_ids, unique = set(), set(), []
         for tc in tool_calls:
             arguments = tc.function.arguments
             try:
                 arguments = json.dumps(json.loads(arguments), separators=(",", ":"), sort_keys=True)
             except (TypeError, ValueError):
                 pass
+            
             key = (tc.function.name, arguments)
-            if key in seen:
-                logger.warning("Removed duplicate tool call: %s", tc.function.name)
+            cid = coalesce_tool_call_id(tc)
+            
+            # Collapse if (name, args) match OR (effective ID is known and matches)
+            if key in seen_keys or (cid and cid != "unknown" and cid in seen_ids):
+                logger.warning("Removed duplicate tool call: %s (id=%s)", tc.function.name, cid)
                 continue
-            seen.add(key)
+            
+            seen_keys.add(key)
+            if cid and cid != "unknown":
+                seen_ids.add(cid)
             unique.append(tc)
         return unique if len(unique) < len(tool_calls) else tool_calls
 
