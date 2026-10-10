@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30.0
 
+# A service account has no default vault, so `op item get <id>` refuses to run without one.
+_VAULT_REQUIRED = "a vault query must be provided"
+_NOT_IN_VAULT = "isn't an item in the"
+
+
+def _vault_mismatch(exc: Exception) -> bool:
+    """True when the failure is an absent/wrong vault — another vault may still hold the item."""
+    message = str(exc)
+    return _VAULT_REQUIRED in message or _NOT_IN_VAULT in message
+
 
 class OnePasswordLoginBackend(LoginBackend):
     name = "onepassword"
@@ -38,6 +48,8 @@ class OnePasswordLoginBackend(LoginBackend):
         from agent.secret_scope import get_secret
         env_name = str(self.cfg.get("service_account_token_env") or "OP_SERVICE_ACCOUNT_TOKEN")
         self._service_token = get_secret(env_name, "") or ""
+        # Vault that accepted the last item read: only service accounts need it (no default vault).
+        self._vault_hint: Optional[str] = None
 
     # ── auth ────────────────────────────────────────────────────────────────
 
@@ -120,16 +132,67 @@ class OnePasswordLoginBackend(LoginBackend):
         return next((m for m in self.list_items() if m.id == handle), None)
 
     def resolve_password(self, handle: str) -> str:
-        item_id = handle[len(self.prefix):]
-        return self._run("item", "get", item_id, "--fields", "label=password", "--reveal").rstrip("\r\n")
+        return self._item_get(handle[len(self.prefix):], "--fields", "label=password", "--reveal").rstrip("\r\n")
 
     def resolve_otp(self, handle: str) -> Optional[str]:
         # `--otp` mints the current TOTP from the item's one-time-password field; items without one error out.
         try:
-            code = self._run("item", "get", handle[len(self.prefix):], "--otp").strip()
+            code = self._item_get(handle[len(self.prefix):], "--otp").strip()
         except Exception:
             return None
         return code if code.isdigit() else None
+
+    # ── item reads ──────────────────────────────────────────────────────────
+
+    def _item_get(self, item_id: str, *args: str) -> str:
+        """``op item get`` bound to a vault.
+
+        A service account has no default vault, so ``item get <id>`` fails with "a vault query must
+        be provided ..." even for an id its own ``item list`` returned. ``vault.onepassword.vault``
+        (or ``vault_name``) pins the vault the way ``account`` pins the session; otherwise the
+        vaults this account can read are probed once and the one holding the item is remembered.
+        """
+        pinned = str(self.cfg.get("vault") or self.cfg.get("vault_name") or "").strip()
+        if pinned:
+            return self._run("item", "get", item_id, "--vault", pinned, *args)
+        if self._vault_hint:
+            try:
+                return self._run("item", "get", item_id, "--vault", self._vault_hint, *args)
+            except RuntimeError as exc:
+                if not _vault_mismatch(exc):
+                    raise
+                self._vault_hint = None
+        try:
+            return self._run("item", "get", item_id, *args)
+        except RuntimeError as exc:
+            if not _vault_mismatch(exc):
+                raise
+        return self._item_get_from_any_vault(item_id, *args)
+
+    def _item_get_from_any_vault(self, item_id: str, *args: str) -> str:
+        """First readable vault holding *item_id* wins; a vault without it is skipped, not fatal."""
+        error: Optional[Exception] = None
+        for vault in self._vault_names():
+            try:
+                out = self._run("item", "get", item_id, "--vault", vault, *args)
+            except RuntimeError as exc:
+                if not _vault_mismatch(exc):
+                    raise
+                error = exc
+                continue
+            self._vault_hint = vault
+            return out
+        raise error or RuntimeError("op failed: no vault this account can read holds that item")
+
+    def _vault_names(self) -> List[str]:
+        """Vault names this account can read (``--vault`` accepts a name or an id)."""
+        raw = json.loads(self._run("vault", "list", "--format", "json") or "[]")
+        out: List[str] = []
+        for vault in raw if isinstance(raw, list) else []:
+            name = str((vault or {}).get("name") or (vault or {}).get("id") or "").strip()
+            if name and name not in out:
+                out.append(name)
+        return out
 
 
 def _web_origins(origins: List[str]) -> tuple:
