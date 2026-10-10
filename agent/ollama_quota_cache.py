@@ -45,10 +45,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 USAGE_URL = "https://ollama.com/api/usage"
 # Switch away from a key once its quota reaches this fraction consumed.
@@ -116,8 +120,8 @@ def _load_env_keys() -> dict[str, str]:
     return secrets
 
 
-def _fetch_usage(key: str) -> float:
-    """Live query of quota fraction (0..1) for one key.
+def _fetch_usage(key: str) -> Optional[float]:
+    """Live query of quota fraction (0..1) for one key, or None if unknown.
 
     Ollama Cloud keys are not all on the same plan: some accounts meter a
     ``weekly`` window, others only a ``monthly`` one, and some expose both.
@@ -127,9 +131,13 @@ def _fetch_usage(key: str) -> float:
 
     So take the highest consumption across the buckets the response actually
     carries: the binding constraint is whichever window is closest to its cap.
-    A missing bucket contributes nothing; an absent/empty ``limits`` object
-    leaves the key at 0.0 (treated as healthy, with the reactive 429 rotation
-    as the backstop).
+
+    When the response exposes NO recognised meter at all (an absent/empty
+    ``limits`` object, or one that carries neither a ``weekly`` nor a
+    ``monthly`` bucket), the answer is ``None`` — genuinely UNKNOWN, not
+    healthy. Reporting ``0.0`` there would claim a health we cannot observe;
+    ``None`` lets the caller stay conservative (do not proactively skip) while
+    the reactive 429 rotation backstops.
     """
     req = urllib.request.Request(
         USAGE_URL,
@@ -138,6 +146,7 @@ def _fetch_usage(key: str) -> float:
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode())
     limits = data.get("limits") or {}
+    found_bucket = False
     highest = 0.0
     # Only the LONG-HORIZON quota windows drive proactive skip. ``session`` is
     # Ollama Cloud's 6-hour rolling window — it self-heals on a 6h cycle, far
@@ -149,6 +158,7 @@ def _fetch_usage(key: str) -> float:
         entry = limits.get(bucket)
         if not isinstance(entry, dict):
             continue
+        found_bucket = True
         usage = entry.get("usage")
         if usage is None:
             continue
@@ -156,6 +166,11 @@ def _fetch_usage(key: str) -> float:
             highest = max(highest, float(usage))
         except (TypeError, ValueError):
             continue
+    if not found_bucket:
+        # Neither a ``weekly`` nor a ``monthly`` bucket is present: the endpoint
+        # exposes no meter we can read, so the answer is UNKNOWN (None) rather
+        # than a fabricated 0.0 that would fake health.
+        return None
     return highest
 
 
@@ -208,9 +223,15 @@ def _cache_stale(cache: dict | None) -> bool:
     return not isinstance(cache.get("keys"), dict)
 
 
-def _snapshot_from_usage(usage_by_env: dict[str, str], usage: dict[str, float]) -> dict:
+def _snapshot_from_usage(usage_by_env: dict[str, str], usage: dict[str, Optional[float]]) -> dict:
+    def _recorded(name: str) -> Optional[float]:
+        value = usage.get(name)
+        # An unknown usage is persisted as JSON null rather than a fabricated
+        # 0.0. The read side treats null as "do not skip"; ``fp`` is unchanged.
+        return None if value is None else round(value, 4)
+
     keys = {
-        name: {"usage": round(usage.get(name, 0.0), 4), "fp": _fingerprint(secret)}
+        name: {"usage": _recorded(name), "fp": _fingerprint(secret)}
         for name, secret in usage_by_env.items()
     }
     return {"date": _today_utc(), "updated_ts": datetime.now(timezone.utc).timestamp(), "keys": keys}
@@ -220,17 +241,28 @@ def refresh_daily_cache() -> dict:
     """Fill/refresh the daily cache with a live query of every known key.
 
     Call this on the first request of the day (or when the cache is stale).
-    Network failure is tolerated: a failing key is recorded at 0.0 usage (so
-    it stays available and the reactive 429 rotation backstops), and a key that
-    cannot be reached is not dropped from the pool.
+    Network failure is tolerated: a failing key is recorded as UNKNOWN
+    (``None``, JSON null) so it stays available and the reactive 429 rotation
+    backstops, and a key that cannot be reached is not dropped from the pool.
     """
     keys = _load_env_keys()
-    usage_by_env: dict[str, float] = {}
+    usage_by_env: dict[str, Optional[float]] = {}
     for name, secret in keys.items():
         try:
             usage_by_env[name] = _fetch_usage(secret)
         except Exception:
-            usage_by_env[name] = 0.0  # assume healthy; reactive 429 catches it
+            # Unreachable / unparseable: unknown, NOT healthy. Do not fabricate
+            # a 0.0 that would fake a health we never observed.
+            usage_by_env[name] = None
+    unknown = sorted(name for name, value in usage_by_env.items() if value is None)
+    if unknown:
+        logger.warning(
+            "Ollama quota cache: %s has/have UNKNOWN quota state — "
+            "/api/usage exposes no recognisable weekly/monthly meter, so "
+            "proactive skip is disabled for these key(s); the reactive 429 "
+            "rotation still covers them.",
+            ", ".join(unknown),
+        )
     snapshot = _snapshot_from_usage(keys, usage_by_env)
     _write_cache(snapshot)
     return snapshot
@@ -269,16 +301,19 @@ def get_ollama_key_status(threshold: float = DEFAULT_QUOTA_THRESHOLD) -> dict[st
 
         status: dict[str, str] = {}
         for name in keys:
-            usage = cached_keys.get(name, {}).get("usage", 0.0) if isinstance(
-                cached_keys.get(name), dict
-            ) else 0.0
-            status[name] = _status_from_usage(float(usage), threshold)
+            cached = cached_keys.get(name)
+            usage = cached.get("usage") if isinstance(cached, dict) else None
+            status[name] = _status_from_usage(usage, threshold)
         return status
     except Exception:
         return {name: STATUS_OK for name in _load_env_keys()}
 
 
-def _status_from_usage(usage: float, threshold: float) -> str:
+def _status_from_usage(usage: Optional[float], threshold: float) -> str:
+    if usage is None:
+        # UNKNOWN is NOT unhealthy: we cannot observe a meter, so never skip.
+        # Selection behaviour is identical to the old fabricated 0.0.
+        return STATUS_OK
     if usage >= 1.0:
         return STATUS_EXHAUSTED
     if usage >= threshold:
