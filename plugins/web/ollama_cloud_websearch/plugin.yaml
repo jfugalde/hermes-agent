@@ -1,0 +1,7 @@
+name: web-ollama-cloud-websearch
+version: 1.0.0
+description: "Ollama Cloud web search — POST https://ollama.com/api/web_search (requires OLLAMA_API_KEY)."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - ollama-cloud-websearch
