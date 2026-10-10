@@ -151,6 +151,13 @@ EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60
 # credential cools down briefly instead.
 EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS = 60
 
+# Ollama Cloud charges per subscription key, and a 429 on one key says nothing
+# about its sibling. Without a ground-truth capture of the key that was actually
+# dispatched, a 429 can be attributed to the WRONG (healthy) entry, and the
+# default one-hour bench then takes the whole profile down. A spent key is cheap
+# to re-probe: retry once a minute and let the next 429 rotate to the sibling.
+EXHAUSTED_TTL_OLLAMA_CLOUD_429_SECONDS = 60
+
 # ``FailoverReason.billing`` as a bare string: the pool persists classified
 # failure semantics to JSON and must not import the classifier.
 FAILURE_REASON_BILLING = "billing"
@@ -387,6 +394,7 @@ def _exhausted_ttl(
     *,
     sole_credential: bool = False,
     failure_reason: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> int:
     """Return cooldown seconds based on the HTTP status that caused exhaustion.
 
@@ -400,9 +408,18 @@ def _exhausted_ttl(
     bench regardless of status; 402 is billing by definition.
     Unverified billing (#82154) gets the short cooldown regardless of pool
     size (the credential may be healthy), unless the status is a true 402.
+
+    *provider*: when it is ``ollama-cloud`` a 429 gets a dedicated short TTL,
+    handled before the billing branch (see below); other providers keep the
+    historical behaviour untouched.
     """
     if error_code == 401:
         return EXHAUSTED_TTL_401_SECONDS
+    if provider == "ollama-cloud" and error_code == 429:
+        # Deliberately BEFORE the billing branch: Ollama Cloud's weekly-limit
+        # 429 is classified as billing, which would otherwise force the full
+        # one-hour bench on a key that may simply be mis-attributed.
+        return EXHAUSTED_TTL_OLLAMA_CLOUD_429_SECONDS
     base = EXHAUSTED_TTL_429_SECONDS if error_code == 429 else EXHAUSTED_TTL_DEFAULT_SECONDS
     if failure_reason == FAILURE_REASON_BILLING_UNVERIFIED and error_code != 402:
         return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
@@ -489,6 +506,7 @@ def _exhausted_until(entry: PooledCredential, *, sole_credential: bool = False) 
             entry.last_error_code,
             sole_credential=sole_credential,
             failure_reason=entry.failure_reason,
+            provider=entry.provider,
         )
     return None
 
