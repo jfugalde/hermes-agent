@@ -2855,7 +2855,32 @@ def _compose_run_delivery(
         from cron.scheduler_failure_copy import blocked_config_notice
         deliver_content = blocked_config_notice(job.get("name") or job["id"], _pf_text)
     elif success:
-        deliver_content = final_response
+        # The agent's final response is shipped straight to a human, so validate it first. A run
+        # can report success while producing nothing deliverable: an exception line rendered as
+        # text, or a dump of the skill it was told to follow (both observed on nihongo crons,
+        # 2026-10-17..19). See cron/delivery_sanitizer.py.
+        from cron.delivery_sanitizer import degraded_run_notice, sanitize_agent_response
+
+        sanitized = sanitize_agent_response(final_response)
+        if sanitized.text:
+            deliver_content = sanitized.text
+        elif (final_response or "").strip():
+            # There WAS content, but none of it survived: an exception rendered as text, or a
+            # document dump with no lesson in it. Say so — silence here would look like the job
+            # simply did not run.
+            deliver_content = degraded_run_notice(
+                job.get("name") or job["id"], sanitized.degraded_reason
+            )
+        else:
+            # Genuinely empty/whitespace. Preserve the existing contract: nothing to deliver, and
+            # the run is marked failed downstream. A notice here would change that behaviour.
+            deliver_content = final_response
+        if sanitized.is_degraded:
+            logger.warning(
+                "Job '%s': degraded agent response (%s), %d chars removed — delivered %s",
+                job.get("id"), sanitized.degraded_reason, sanitized.removed_chars,
+                "the cleaned text" if sanitized.text else "a notice instead",
+            )
         _resolve_incidents_for_recovered_job(job)
     else:
         # Record the job+error signature once; withhold the per-run ping while the operator
