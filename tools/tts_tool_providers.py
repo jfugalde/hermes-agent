@@ -9,11 +9,13 @@ are resolved through :func:`_origin` at call time.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
 import logging
 import os
+import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,6 +195,69 @@ def _rewrite_with_auxiliary_model(
 
 
 # --- Edge TTS (free default) ---
+
+# Microsoft's consumer speech endpoint intermittently refuses a perfectly valid request with a
+# handshake 403/429. Observed 2026-10-20 03:01 UTC: a single 403 cost an evening tutoring session
+# its audio entirely, while the identical call succeeded minutes later from the same host on the
+# same edge-tts 7.3.1 (`wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud`).
+# A transient refusal is NOT a configuration error, so it is worth retrying: the student losing the
+# audio once is worse than a two-second wait. Genuine failures (missing module, unknown voice) are
+# not in this set and still fail on the first attempt.
+_EDGE_TRANSIENT_STATUSES = frozenset({403, 408, 429, 500, 502, 503, 504})
+_EDGE_TRANSIENT_EXC_NAMES = frozenset({
+    "WSServerHandshakeError", "ClientConnectorError", "ServerDisconnectedError",
+    "ServerTimeoutError", "TimeoutError", "ConnectionResetError", "ConnectionError",
+})
+_EDGE_RETRY_ATTEMPTS = 3
+_EDGE_RETRY_BASE_DELAY = 0.8  # seconds; doubles per attempt, jittered
+
+
+def _is_transient_edge_failure(exc: BaseException) -> bool:
+    """True when repeating the same request could plausibly succeed."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and status in _EDGE_TRANSIENT_STATUSES:
+        return True
+    if type(exc).__name__ in _EDGE_TRANSIENT_EXC_NAMES:
+        return True
+    # aiohttp raises this text for a handshake refusal that carries no usable status code.
+    return "Invalid response status" in str(exc)
+
+
+async def _edge_save_with_retry(
+    communicate_factory,
+    output_path: str,
+    *,
+    attempts: int = _EDGE_RETRY_ATTEMPTS,
+    base_delay: float = _EDGE_RETRY_BASE_DELAY,
+) -> str:
+    """``save()`` the edge stream, retrying transient upstream refusals with jittered backoff.
+
+    A half-written file from the failed attempt is removed before retrying so a later success can
+    never be mistaken for, or mixed with, a truncated one.
+    """
+    last: Optional[BaseException] = None
+    delay = base_delay
+    for attempt in range(1, attempts + 1):
+        try:
+            await communicate_factory().save(output_path)
+            return output_path
+        except BaseException as exc:  # noqa: BLE001 - re-raised below unless transient
+            last = exc
+            if attempt >= attempts or not _is_transient_edge_failure(exc):
+                raise
+            with contextlib.suppress(OSError):
+                os.unlink(output_path)  # never leave a truncated take behind
+            wait = delay * (0.5 + random.random())
+            logger.warning(
+                "edge TTS attempt %d/%d failed (%s: %s) — retrying in %.1fs",
+                attempt, attempts, type(exc).__name__, exc, wait,
+            )
+            await asyncio.sleep(wait)
+            delay *= 2
+    assert last is not None  # unreachable: the loop either returns or raises
+    raise last
+
+
 async def _generate_edge_tts(text: str, output_path: str, tts_config: dict[str, Any]) -> str:
     edge_tts = _origin()._import_edge_tts()
     edge_config = tts_config.get("edge") or {}
@@ -200,8 +265,9 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: dict[str, 
     kwargs = {"voice": edge_config.get("voice", DEFAULT_EDGE_VOICE)}
     if speed != 1.0:
         kwargs["rate"] = f"{round((speed - 1.0) * 100):+d}%"
-    await edge_tts.Communicate(text, **kwargs).save(output_path)
-    return output_path
+    return await _edge_save_with_retry(
+        lambda: edge_tts.Communicate(text, **kwargs), output_path
+    )
 
 
 # --- ElevenLabs ---
