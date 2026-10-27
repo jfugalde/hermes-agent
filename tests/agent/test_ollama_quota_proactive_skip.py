@@ -148,6 +148,115 @@ def test_fetch_usage_ignores_session_bucket(monkeypatch):
     assert qc._fetch_usage("sk-anything") == pytest.approx(0.10)
 
 
+# --- _fetch_usage: post-Oct-2026 shape (no ``limits`` meter) --------------------
+
+
+def _spend_payload(spend_usd=None, buckets=None):
+    """The CURRENT /api/usage shape: money/requests, no quota fraction."""
+    payload = {
+        "range": "7d",
+        "scope": "self",
+        "granularity": "day",
+        "from": "2026-10-19T00:00:00Z",
+        "until": "2026-10-26T00:00:00Z",
+        "totals": {"request_count": 1234},
+    }
+    if spend_usd is not None:
+        payload["totals"]["usage_usd"] = spend_usd
+    if buckets is not None:
+        payload["buckets"] = buckets
+    return payload
+
+
+def _serve(monkeypatch, payload):
+    from agent import ollama_quota_cache as qc
+
+    class _Resp:
+        def read(self_inner):
+            return json.dumps(payload).encode()
+
+        def __enter__(self_inner):
+            return self_inner
+
+        def __exit__(self_inner, *a):
+            return False
+
+    monkeypatch.setattr(qc.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    return qc
+
+
+def _hermes_home_with_caps(tmp_path, monkeypatch, body: str):
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".env").write_text(body, encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def test_fetch_usage_scores_spend_against_declared_cap(tmp_path, monkeypatch):
+    """No fraction meter -> fraction = trailing spend / the key's OWN cap.
+
+    This is the whole point of the fix: ``limits`` is gone from /api/usage, so
+    without a spend-vs-cap path every key reads 'ok' and ``fill_first`` pins the
+    first key until it hard-caps.
+    """
+    _hermes_home_with_caps(tmp_path, monkeypatch, "OLLAMA_API_KEY_CAP_USD=110\n")
+    qc = _serve(monkeypatch, _spend_payload(spend_usd=55.0))
+    assert qc._fetch_usage("sk-anything", env_name="OLLAMA_API_KEY") == pytest.approx(0.5)
+
+
+def test_fetch_usage_over_cap_reports_exhausted_range(tmp_path, monkeypatch):
+    """Spend past the cap must exceed 1.0 so ``_status_from_usage`` benches it."""
+    _hermes_home_with_caps(tmp_path, monkeypatch, "OLLAMA_API_KEY_CAP_USD=100\n")
+    qc = _serve(monkeypatch, _spend_payload(spend_usd=106.29))
+    fraction = qc._fetch_usage("sk-anything", env_name="OLLAMA_API_KEY")
+    assert fraction is not None and fraction > 1.0
+    assert qc._status_from_usage(fraction, qc.DEFAULT_QUOTA_THRESHOLD) == qc.STATUS_EXHAUSTED
+
+
+def test_fetch_usage_new_shape_without_cap_is_unknown(tmp_path, monkeypatch):
+    """An unmetered key must stay UNKNOWN — never borrow the sibling's cap."""
+    _hermes_home_with_caps(tmp_path, monkeypatch, "OLLAMA_API_KEY_CAP_USD=110\n")
+    qc = _serve(monkeypatch, _spend_payload())  # no usage_usd at all
+    assert qc._fetch_usage("sk-anything", env_name="OLLAMA_API_KEY_FALLBACK") is None
+    # Same payload WITH a cap but no spend signal is still UNKNOWN, not 0.0.
+    assert qc._fetch_usage("sk-anything", env_name="OLLAMA_API_KEY") is None
+
+
+def test_fetch_usage_sums_buckets_when_totals_lack_spend(tmp_path, monkeypatch):
+    """A totals-less/bucket-only response still yields a spend figure."""
+    _hermes_home_with_caps(tmp_path, monkeypatch, "OLLAMA_API_KEY_CAP_USD=40\n")
+    qc = _serve(
+        monkeypatch,
+        _spend_payload(buckets=[{"usage_usd": 10.0}, {"usage_usd": 10.0}, {"request_count": 9}]),
+    )
+    assert qc._fetch_usage("sk-anything", env_name="OLLAMA_API_KEY") == pytest.approx(0.5)
+
+
+def test_fetch_usage_legacy_meter_still_wins_over_cap(tmp_path, monkeypatch):
+    """If a response DOES expose ``limits``, the real meter outranks spend/cap."""
+    _hermes_home_with_caps(tmp_path, monkeypatch, "OLLAMA_API_KEY_CAP_USD=10\n")
+    qc = _serve(
+        monkeypatch,
+        {"limits": {"weekly": {"usage": 0.20}}, "totals": {"usage_usd": 500.0}},
+    )
+    assert qc._fetch_usage("sk-anything", env_name="OLLAMA_API_KEY") == pytest.approx(0.20)
+
+
+def test_load_caps_only_accepts_known_keys_and_positive_numbers(tmp_path, monkeypatch):
+    _hermes_home_with_caps(
+        tmp_path,
+        monkeypatch,
+        "OLLAMA_API_KEY_CAP_USD=110\n"
+        "OLLAMA_API_KEY_FALLBACK_CAP_USD=0\n"
+        "SOME_OTHER_CAP_USD=50\n"
+        "OLLAMA_API_KEY_2_CAP_USD=not-a-number\n",
+    )
+    from agent import ollama_quota_cache as qc
+
+    assert qc._load_caps() == {"OLLAMA_API_KEY": 110.0}
+
+
 # --- _available_entries: proactive skip -----------------------------------------
 
 

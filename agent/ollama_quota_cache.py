@@ -62,6 +62,21 @@ CACHE_FILENAME = "ollama-quota-daily.json"
 
 _ENV_KEYS = ("OLLAMA_API_KEY", "OLLAMA_API_KEY_FALLBACK", "OLLAMA_API_KEY_2")
 
+# Ollama removed the 0..1 ``limits`` meter from ``/api/usage`` (Oct 2026): the
+# response now carries money/requests over a range (``totals`` + ``buckets``)
+# and no quota fraction at all. The only constrained quantity still observable
+# is spend, so a key whose plan caps a 7-DAY window is scored empirically:
+# ``fraction = trailing_7d_spend_usd / cap_usd``. The cap is per key (plans
+# differ, and an unmetered key must NOT be given someone else's cap), supplied
+# as ``<ENV_NAME>_CAP_USD`` next to the key itself — e.g.
+# ``OLLAMA_API_KEY_CAP_USD=110`` in ``$HERMES_HOME/.env``.
+#
+# ``usage_usd`` from the default ``range=7d`` response IS trailing-7d spend, so
+# no window arithmetic is needed. A key without a configured cap reports UNKNOWN
+# (None, never skip proactively) and is covered by the reactive 429 rotation.
+CAP_USD_SUFFIX = "_CAP_USD"
+
+
 # Status strings returned by get_ollama_key_status().
 STATUS_OK = "ok"
 STATUS_AT_RISK = "at_risk"  # crossed threshold but not exhausted — skip only if a healthier key exists
@@ -120,7 +135,78 @@ def _load_env_keys() -> dict[str, str]:
     return secrets
 
 
-def _fetch_usage(key: str) -> Optional[float]:
+def _load_caps() -> dict[str, float]:
+    """Return {env_var: cap_usd} for every OLLAMA_*_KEY that declares a cap.
+
+    A cap is a property of the ACCOUNT's plan, not of the profile, so it is read
+    from the same ``$HERMES_HOME/.env`` that supplies the key (with the process
+    environment as an override, mirroring ``_load_env_keys``). Absence is
+    meaningful: no cap means "we cannot compute a fraction", never "unlimited".
+    """
+    caps: dict[str, float] = {}
+
+    def _record(name: str, raw: str) -> None:
+        if not name.endswith(CAP_USD_SUFFIX):
+            return
+        key_name = name[: -len(CAP_USD_SUFFIX)]
+        if key_name not in _ENV_KEYS:
+            return
+        try:
+            value = float(str(raw).strip().strip('"').strip("'"))
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            caps[key_name] = value
+
+    env_file = _hermes_home() / ".env"
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, val = line.partition("=")
+            _record(name.strip(), val)
+
+    for key_name in _ENV_KEYS:
+        raw = (os.environ.get(key_name + CAP_USD_SUFFIX) or "").strip()
+        if raw:
+            _record(key_name + CAP_USD_SUFFIX, raw)
+
+    return caps
+
+
+def _trailing_spend_usd(data: dict) -> Optional[float]:
+    """Dollars spent in the response's window (``totals``, else summed buckets).
+
+    The endpoint reports spend over a range (7d by default). ``totals.usage_usd``
+    is authoritative when present; summing ``buckets[].usage_usd`` is the fallback
+    for a response that carries only buckets. Accounts on plans that do not meter
+    cost return neither — that is UNKNOWN, not zero.
+    """
+    totals = data.get("totals")
+    if isinstance(totals, dict):
+        spend = totals.get("usage_usd")
+        if spend is not None:
+            try:
+                return float(spend)
+            except (TypeError, ValueError):
+                pass
+    buckets = data.get("buckets")
+    if isinstance(buckets, list):
+        values: list[float] = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict) or bucket.get("usage_usd") is None:
+                continue
+            try:
+                values.append(float(bucket["usage_usd"]))
+            except (TypeError, ValueError):
+                continue
+        if values:
+            return sum(values)
+    return None
+
+
+def _fetch_usage(key: str, env_name: Optional[str] = None) -> Optional[float]:
     """Live query of quota fraction (0..1) for one key, or None if unknown.
 
     Ollama Cloud keys are not all on the same plan: some accounts meter a
@@ -167,9 +253,19 @@ def _fetch_usage(key: str) -> Optional[float]:
         except (TypeError, ValueError):
             continue
     if not found_bucket:
-        # Neither a ``weekly`` nor a ``monthly`` bucket is present: the endpoint
-        # exposes no meter we can read, so the answer is UNKNOWN (None) rather
-        # than a fabricated 0.0 that would fake health.
+        # Neither a ``weekly`` nor a ``monthly`` bucket is present. Two very
+        # different situations produce that shape:
+        #   * a pre-Oct-2026 response with no long-horizon window -> UNKNOWN;
+        #   * the CURRENT response (``range/scope/totals/buckets``), where the
+        #     fraction meter is gone entirely and spend is the only signal.
+        # In the second case score the key empirically against its own declared
+        # cap; without a cap we cannot know how full it is, so stay UNKNOWN
+        # (None) rather than fabricate health.
+        cap = _load_caps().get(env_name) if env_name else None
+        if cap:
+            spend = _trailing_spend_usd(data)
+            if spend is not None:
+                return spend / cap
         return None
     return highest
 
@@ -246,22 +342,39 @@ def refresh_daily_cache() -> dict:
     backstops, and a key that cannot be reached is not dropped from the pool.
     """
     keys = _load_env_keys()
+    caps = _load_caps()
     usage_by_env: dict[str, Optional[float]] = {}
     for name, secret in keys.items():
         try:
-            usage_by_env[name] = _fetch_usage(secret)
+            usage_by_env[name] = _fetch_usage(secret, env_name=name)
         except Exception:
             # Unreachable / unparseable: unknown, NOT healthy. Do not fabricate
             # a 0.0 that would fake a health we never observed.
             usage_by_env[name] = None
     unknown = sorted(name for name, value in usage_by_env.items() if value is None)
     if unknown:
+        # Say WHICH unknown this is. "/api/usage changed shape" and "this key's
+        # plan does not meter dollars" have the same effect on the pool but very
+        # different fixes, and a vague warning sent readers hunting the wrong one.
+        no_cap = [name for name in unknown if name not in caps]
+        no_spend = [name for name in unknown if name in caps]
+        details = []
+        if no_cap:
+            details.append(
+                "no cap configured (set %s in $HERMES_HOME/.env)"
+                % ", ".join(f"{name}{CAP_USD_SUFFIX}=<usd>" for name in no_cap)
+            )
+        if no_spend:
+            details.append(
+                "cap configured but the account reports no usage_usd for %s"
+                % ", ".join(no_spend)
+            )
         logger.warning(
-            "Ollama quota cache: %s has/have UNKNOWN quota state — "
-            "/api/usage exposes no recognisable weekly/monthly meter, so "
+            "Ollama quota cache: %s has/have UNKNOWN quota state — %s, so "
             "proactive skip is disabled for these key(s); the reactive 429 "
             "rotation still covers them.",
             ", ".join(unknown),
+            "; ".join(details) or "no readable quota signal",
         )
     snapshot = _snapshot_from_usage(keys, usage_by_env)
     _write_cache(snapshot)
