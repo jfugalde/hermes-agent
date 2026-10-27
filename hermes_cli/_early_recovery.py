@@ -67,8 +67,22 @@ def restore_quarantined_shims(
 _UPDATE_RETRY_RECOVERED = False
 
 
+# Tokens that make an invocation pure introspection: argparse prints help and exits before any
+# handler runs, so no credential resolved for it can ever be used. A literal ``--help``/``-h``
+# token always ends in argparse help or an argparse usage error, never in an agent turn — a
+# prompt that merely CONTAINS the word (``-z "show me --help"``) is one argv token and does not
+# match.
+_PASSIVE_INTROSPECTION_TOKENS = frozenset({"-h", "--help"})
+
+
+def _is_passive_introspection() -> bool:
+    """True when this process only prints help/usage and exits (``hermes --help``)."""
+    return any(token in _PASSIVE_INTROSPECTION_TOKENS for token in sys.argv[1:])
+
+
 def _should_skip_external_secret_sources() -> bool:
-    """True inside any ``hermes update`` process (and its import probes).
+    """True inside any ``hermes update`` process (and its import probes) or any passive
+    introspection invocation (``hermes --help``, ``hermes <cmd> -h``).
 
     Every dotenv load in the process — ``hermes_cli.main``, ``run_agent``, ``cli`` — consults
     this, so the updater never resolves external secret sources: on Windows they map
@@ -77,8 +91,17 @@ def _should_skip_external_secret_sources() -> bool:
     120s critical-module import probe and be reported as an import-health timeout.
     Profile flags are stripped before ``hermes_cli.main`` loads dotenv, so ``argv[1]`` is
     the authoritative subcommand.
+
+    Help is skipped for least privilege: ``hermes --help`` prints static text and exits, yet it
+    used to fetch every enabled secret source and inject those values into ``os.environ``,
+    where a pager/child process/crash dump could read them and where a vault outage made an
+    inert command hang or fail. Introspection needs no credentials.
     """
-    return _UPDATE_RETRY_RECOVERED or sys.argv[1:2] == ["update"]
+    return (
+        _UPDATE_RETRY_RECOVERED
+        or sys.argv[1:2] == ["update"]
+        or _is_passive_introspection()
+    )
 
 
 def _project_root() -> Path:
