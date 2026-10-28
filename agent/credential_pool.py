@@ -150,12 +150,27 @@ EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60
 # credential cools down briefly instead.
 EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS = 60
 
-# Ollama Cloud charges per subscription key, and a 429 on one key says nothing
-# about its sibling. Without a ground-truth capture of the key that was actually
-# dispatched, a 429 can be attributed to the WRONG (healthy) entry, and the
-# default one-hour bench then takes the whole profile down. A spent key is cheap
-# to re-probe: retry once a minute and let the next 429 rotate to the sibling.
-EXHAUSTED_TTL_OLLAMA_CLOUD_429_SECONDS = 60
+# Ollama Cloud drain-first policy (explicit, not a workaround).
+#
+# The Ollama Cloud key in this install refills weekly and is deliberately
+# priority-0: the pool drains it FIRST and only overflows to the credits key
+# once it is benched. So a 429 on it is the expected, healthy signal that the
+# weekly window is spent — not evidence the key is dead.
+#
+# The bench is therefore one hour: the pool re-probes the priority-0 key hourly
+# and returns to it automatically as soon as its window refills, with no
+# operator action. ``last_error_reset_at`` (a provider-supplied retry hint)
+# still wins over this TTL in ``_exhausted_until``.
+#
+# The previous 60-second bench was a workaround for a mis-attributed 429 and it
+# backfired: with a one-minute window the pool re-hit a spent key on every
+# turn, producing ~5,000 log lines over three days and giving the same profile
+# one failed call per turn instead of one per hour.
+EXHAUSTED_TTL_OLLAMA_CLOUD_429_SECONDS = 60 * 60
+
+# Operator escape hatch: retune the bench cadence of a running install without
+# a code edit (seconds, positive float).
+OLLAMA_CLOUD_429_TTL_ENV = "HERMES_OLLAMA_429_TTL_SECONDS"
 
 # ``FailoverReason.billing`` as a bare string: the pool persists classified
 # failure semantics to JSON and must not import the classifier.
@@ -388,13 +403,32 @@ def _is_manual_source(source: str) -> bool:
     return normalized == SOURCE_MANUAL or normalized.startswith(f"{SOURCE_MANUAL}:")
 
 
+def _ollama_cloud_429_ttl() -> float:
+    """Bench length for an Ollama Cloud 429, in seconds.
+
+    ``HERMES_OLLAMA_429_TTL_SECONDS`` overrides the compiled default so an
+    operator can retune the drain-first cadence on a running install. A
+    non-numeric, zero or negative value is ignored and the module constant
+    applies.
+    """
+    raw = os.environ.get(OLLAMA_CLOUD_429_TTL_ENV)
+    if raw is not None:
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value > 0:
+            return value
+    return float(EXHAUSTED_TTL_OLLAMA_CLOUD_429_SECONDS)
+
+
 def _exhausted_ttl(
     error_code: Optional[int],
     *,
     sole_credential: bool = False,
     failure_reason: Optional[str] = None,
     provider: Optional[str] = None,
-) -> int:
+) -> float:
     """Return cooldown seconds based on the HTTP status that caused exhaustion.
 
     *sole_credential*: the pool has nothing to rotate to, so transient
@@ -408,7 +442,8 @@ def _exhausted_ttl(
     Unverified billing (#82154) gets the short cooldown regardless of pool
     size (the credential may be healthy), unless the status is a true 402.
 
-    *provider*: when it is ``ollama-cloud`` a 429 gets a dedicated short TTL,
+    *provider*: when it is ``ollama-cloud`` a 429 gets its own drain-first
+    bench (one hour by default, tunable via ``HERMES_OLLAMA_429_TTL_SECONDS``),
     handled before the billing branch (see below); other providers keep the
     historical behaviour untouched.
     """
@@ -416,9 +451,10 @@ def _exhausted_ttl(
         return EXHAUSTED_TTL_401_SECONDS
     if provider == "ollama-cloud" and error_code == 429:
         # Deliberately BEFORE the billing branch: Ollama Cloud's weekly-limit
-        # 429 is classified as billing, which would otherwise force the full
-        # one-hour bench on a key that may simply be mis-attributed.
-        return EXHAUSTED_TTL_OLLAMA_CLOUD_429_SECONDS
+        # 429 is classified as billing, and the drain-first policy wants the
+        # priority-0 key re-probed hourly so it returns automatically when its
+        # weekly window refills.
+        return _ollama_cloud_429_ttl()
     base = EXHAUSTED_TTL_429_SECONDS if error_code == 429 else EXHAUSTED_TTL_DEFAULT_SECONDS
     if failure_reason == FAILURE_REASON_BILLING_UNVERIFIED and error_code != 402:
         return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
