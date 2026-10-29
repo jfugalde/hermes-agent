@@ -2133,11 +2133,26 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         ollama_status: Dict[str, str] = {}
         if self.provider == "ollama-cloud":
             ollama_status = _get_ollama_key_status(self._ollama_quota_threshold())
-        healthier_env_count = sum(
-            1 for e in self._entries
-            if e.source.startswith("env:")
-            and ollama_status.get(e.source.split(":", 1)[1]) == OLLAMA_STATUS_OK
-        )
+        # A key whose daily quota still reads OK can be mid-cooldown from
+        # Ollama's 6h session-window 429. Counting it as healthier skips the
+        # at-risk fallback and empties the pool while that fallback still has
+        # quota. Only a key that is actually selectable counts.
+        def _quota_healthier(entry: PooledCredential) -> bool:
+            if not entry.source.startswith("env:"):
+                return False
+            if ollama_status.get(entry.source.split(":", 1)[1]) != OLLAMA_STATUS_OK:
+                return False
+            if entry.auth_type == AUTH_TYPE_API_KEY and not entry.runtime_api_key:
+                return False
+            if entry.last_status == STATUS_DEAD:
+                return False
+            if entry.last_status == STATUS_EXHAUSTED:
+                held_until = _exhausted_until(entry, sole_credential=sole_credential)
+                if held_until is not None and now < held_until:
+                    return False
+            return True
+
+        healthier_env_count = sum(1 for e in self._entries if _quota_healthier(e))
         can_skip_at_risk = healthier_env_count > 0
         for entry in self._entries:
             # Borrowed credentials persist as metadata-only references and are
