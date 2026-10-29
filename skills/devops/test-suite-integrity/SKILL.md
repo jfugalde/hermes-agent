@@ -15,7 +15,7 @@ tags: [testing, integrity, assertions, accessibility, delegation]
 - A suite has not actually run in a long time (newly wired to CI, or previously `skipped`).
 
 This skill covers whether the suite is still WORTH anything — not how to make it pass.
-For why a specific CI result is red/skipped, see `ci-result-attribution`.
+For why a specific CI result is red or skipped, see `ci-gate-integrity` Rule 1. A skipped downstream job is not a pass.
 For a skipped downstream job or an adopted gate that writes a score it did not measure, see
 `ci-gate-integrity`. For an assertion that cannot fail even when the code is wrong, see
 `test-assertion-integrity`. `ci-gate-integrity` Rules 3 and 4 point here; do not copy them back.

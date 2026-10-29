@@ -229,7 +229,7 @@ over-escaped CLI arguments, assembled-vs-resolved path compares — see `bash-sc
 
 - **Do not `git stash -u` when the checkout is a runtime home.** Its untracked set IS the
   product (skill library, live data). Stash explicit tracked paths only, and stash the CODE,
-  never the new test you are measuring. (In `~/.hermes`, see `hermes-agent-maintenance`.)
+  never the new test you are measuring.
 - **Never paste diff-style `+` / `-` line prefixes into a patch tool's replacement text.**
   The tool writes them literally as file content; the returned diff renders your stray `+`
   indistinguishably from a diff marker, so the corruption only surfaces on the next read as an

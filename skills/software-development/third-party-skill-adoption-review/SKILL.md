@@ -8,7 +8,7 @@ platforms: [linux, macos]
 metadata:
   hermes:
     tags: [skill-adoption, code-review, gh-cli, verification, license]
-    related_skills: [remote-only-repo-review, ci-gate-integrity, app-architecture-review, spike]
+    related_skills: [ci-gate-integrity, spike]
 ---
 
 # Third-Party Skill / Tool-Bundle Adoption Review
@@ -17,8 +17,8 @@ For "how valuable is <github url>?", "should we install this skill?", "is this t
 it?". The deliverable is NOT a code review — it is a **purchase decision**: what is substance,
 what is hype, what to take, what to reject, and one concrete pilot next.
 
-Composes with `remote-only-repo-review` (API reads, dormancy dating), `ci-gate-integrity`
-(what a gate must prove before you trust it), `spike` (throwaway probe discipline).
+Composes with `ci-gate-integrity` (what a gate must prove before you trust it) and `spike`
+(throwaway probe discipline). Read the remote repo through `gh api` before cloning it.
 
 ## When to Use
 
@@ -26,8 +26,8 @@ Composes with `remote-only-repo-review` (API reads, dormancy dating), `ci-gate-i
 - A colleague or feed points at an agent skill / prompt pack / quality-gate toolchain and you
   must say take-it-or-leave-it with evidence.
 - Before adding any third-party SKILL.md, plugin, or gate tool to this user's library.
-- Not for: reviewing your own repo for bugs (`app-architecture-review`) or PR-level code review
-  (`github-code-review`).
+- Not for: reviewing your own repo for bugs, or a line-by-line PR diff. This skill is a
+  purchase decision.
 
 ## Step 1 — Measure substance before reading a word
 

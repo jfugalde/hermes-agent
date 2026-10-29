@@ -17,7 +17,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [testing, verification, assertions, code-review, pitfalls, subagents]
-    related_skills: [agent-code-verification-pitfalls, leaf-subagent-test-verification-apollo, verify-before-close]
+    related_skills: [test-suite-integrity, red-green-fix-verification]
 ---
 
 # Test Assertion Integrity
@@ -233,8 +233,7 @@ A subagent reporting "N tests pass" on assertions IT wrote is a self-report abou
 scoping. When handed a test file from a fan-out:
 
 1. Read the assertions, not the summary — check scoping (1) and vacuity (2) first.
-2. Independently re-derive the artifact from source rather than trusting the count (see the
-data-artifact and documentation sections in `agent-code-verification-pitfalls`).
+2. Independently re-derive the artifact from source rather than trusting the count.
 3. Confirm each assertion fails when the fix is reverted (3).
 
 ## Verification checklist
@@ -253,11 +252,7 @@ data-artifact and documentation sections in `agent-code-verification-pitfalls`).
 
 ## Relationship to other skills
 
-Overlaps deliberately with the protected `agent-code-verification-pitfalls` (subagent code
-verification; its §1 false-green mirrored-logic test is the sibling failure mode) and
-`leaf-subagent-test-verification-apollo` (leaf-delivered tests being wrong). Both are
-externally-owned / read-only to autonomous curation, so this lesson could not be added there.
-If they are adopted (`hermes curator adopt <name>`), fold §1-3 into them and retire this skill.
-
-A loosened matcher (`toContain` turned into `.some()`, `exact: true` turned into `exact: false`)
-is `test-suite-integrity` Rule 1, not this skill. Do not merge the two.
+A green assertion can still miss the defect: it may cover only element 0, accept a substitute
+with `or`, or pass before and after the fix. Those three shapes are this skill. A loosened
+matcher belongs to `test-suite-integrity` Rule 1. Proving a fix fails before it passes belongs
+to `red-green-fix-verification`. Do not merge the three.
