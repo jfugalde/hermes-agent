@@ -120,6 +120,16 @@ _SYSTEMD_RUN_NO_EXPAND = True
 _MIN_WORKER_MEMORY_MAX_BYTES = 64 * 1024 * 1024
 _DEFAULT_WORKER_MEMORY_MAX_BYTES = 1024 * 1024 * 1024
 _WORKER_MEMORY_MAX_CAP_BYTES = 4 * 1024 * 1024 * 1024
+# MemoryMax bounds RAM but, left alone, the kernel happily swaps the excess instead
+# of killing anything: the scope then thrashes the host while the gateway stays alive
+# but useless. A small swap allowance per worker keeps a brief spike survivable and
+# makes the *second* spike an OOM kill inside the worker's own cgroup — the outcome
+# the isolation exists to produce.
+_WORKER_MEMORY_SWAP_MAX = "512M"
+# ``MemorySwapMax=`` needs systemd >= 243 and a cgroup-v2 memory controller. Hosts
+# below that reject the property and would otherwise fail the availability probe and
+# every scoped spawn, so the probe drops it once and the verdict is reused.
+_SYSTEMD_SCOPE_MEMORY_SWAP_MAX = True
 
 
 def _worker_memory_max_bytes() -> int:
@@ -180,12 +190,18 @@ def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> list[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
     No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486).
-    ``--expand-environment=no`` keeps the command byte-identical (#132385)."""
+    ``--expand-environment=no`` keeps the command byte-identical (#132385).
+    ``MemorySwapMax`` keeps a scope that overshoots ``MemoryMax`` from swapping the
+    host into thrash instead of dying inside its own cgroup (dropped by the probe on
+    systemd versions that reject it)."""
     no_expand = ["--expand-environment=no"] if _SYSTEMD_RUN_NO_EXPAND else []
+    swap = (["--property", f"MemorySwapMax={_WORKER_MEMORY_SWAP_MAX}"]
+            if _SYSTEMD_SCOPE_MEMORY_SWAP_MAX else [])
     return [
         binary, "--user", "--scope", "--quiet", *no_expand, "--unit", unit_name, "--collect",
         "--property", "MemoryAccounting=yes",
         "--property", f"MemoryMax={_worker_memory_max_bytes()}",
+        *swap,
         "--", *argv,
     ]
 
@@ -263,6 +279,7 @@ def _systemd_run_user_scope_available() -> bool:
     Use ``/bin/sh -c 'exit 0'``: NixOS provides ``/bin/sh`` but not ``/bin/true``
     (#105365), regardless of the gateway service's PATH."""
     global _SYSTEMD_SCOPE_AVAILABLE, _SYSTEMD_SCOPE_PROBED_AT, _SYSTEMD_RUN_NO_EXPAND
+    global _SYSTEMD_SCOPE_MEMORY_SWAP_MAX
     verdict = _systemd_scope_cached()
     if verdict is not None:
         return verdict
@@ -281,7 +298,10 @@ def _systemd_run_user_scope_available() -> bool:
                 if binary:
                     # Unique unit avoids collisions; the timeout bounds D-Bus.
                     probe_unit = f"hermes-probe-scope-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-                    for _attempt in range(2):
+                    # Both optional properties are dropped on rejection and the probe is
+                    # retried: an old systemd must degrade to "no MemorySwapMax" or "no
+                    # --expand-environment", never to "no scopes at all".
+                    for _attempt in range(3):
                         result = subprocess.run(
                             _systemd_scope_argv(binary, probe_unit, "/bin/sh", "-c", "exit 0"),
                             stdin=subprocess.DEVNULL, capture_output=True,
@@ -289,11 +309,17 @@ def _systemd_run_user_scope_available() -> bool:
                             env=systemd_user_bus_env(),
                             check=False,
                         )
-                        if not (result.returncode and _SYSTEMD_RUN_NO_EXPAND
-                                and b"expand-environment" in (result.stderr or b"")):
+                        if not result.returncode:
                             break
-                        # systemd < 254 rejects the option: drop it and probe again.
-                        _SYSTEMD_RUN_NO_EXPAND = False
+                        stderr = result.stderr or b""
+                        if _SYSTEMD_SCOPE_MEMORY_SWAP_MAX and b"MemorySwapMax" in stderr:
+                            _SYSTEMD_SCOPE_MEMORY_SWAP_MAX = False
+                            continue
+                        if _SYSTEMD_RUN_NO_EXPAND and b"expand-environment" in stderr:
+                            # systemd < 254 rejects the option: drop it and probe again.
+                            _SYSTEMD_RUN_NO_EXPAND = False
+                            continue
+                        break
                     available = result.returncode == 0
                     if not available:
                         logger.debug(
@@ -341,6 +367,49 @@ def _build_systemd_scope_argv(shell_argv: list[str], unit_suffix: str) -> list[s
         # Caller should have probed availability; never pass None into Popen anyway.
         return shell_argv
     return _systemd_scope_argv(binary, f"hermes-worker-{unit_suffix}", *shell_argv)
+
+
+# Foreground terminal commands are the other half of the same problem: a `pytest`,
+# `npm run build` or `codex exec` run through terminal() synchronously still lands in
+# the gateway's cgroup, so one memory spike takes the messaging control plane down
+# with it. Opt out with HERMES_TERMINAL_FOREGROUND_SCOPE=0 (latency-critical hosts);
+# every failure path below returns the plain argv, i.e. today's behaviour.
+_FOREGROUND_SCOPE_ENV = "HERMES_TERMINAL_FOREGROUND_SCOPE"
+_FOREGROUND_SCOPE_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _foreground_scope_enabled() -> bool:
+    return os.getenv(_FOREGROUND_SCOPE_ENV, "").strip().lower() not in _FOREGROUND_SCOPE_DISABLED_VALUES
+
+
+def foreground_scope_argv(argv: list[str]) -> list[str]:
+    """Wrap a foreground local command in its own transient memory-capped scope.
+
+    Returns *argv* unchanged unless all of: Linux, an operator has not disabled the
+    feature, this process is the live supervised gateway, and ``systemd-run --user
+    --scope`` actually works here. Every other case — CLI, cron, containers without a
+    user bus, macOS/Windows, an import error — degrades to the plain Popen path rather
+    than failing the command.
+
+    The unit is named ``hermes-worker-fg-*`` so the HMM exporter classifies it as
+    ``worker-scope`` next to background workers (``classify_unit`` matches the
+    ``hermes-worker-`` prefix), which is what makes the warning-level
+    ``HermesWorkerScopeOomKilled`` alert cover foreground OOMs too.
+    """
+    if not _IS_LINUX or not _foreground_scope_enabled():
+        return argv
+    try:
+        import shutil
+
+        if not _is_supervised_gateway_process() or not _systemd_run_user_scope_available():
+            return argv
+        if shutil.which("systemd-run") is None:
+            return argv
+        return _build_systemd_scope_argv(
+            argv, unit_suffix=f"fg-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    except Exception as exc:  # isolation is best-effort, never fatal
+        logger.debug("foreground systemd scope unavailable: %s", exc)
+        return argv
 
 
 _scope_degraded_warned = False
