@@ -43,6 +43,70 @@ _SIGNAL_EXIT_NOTES: dict[int, str] = {
     25: "SIGXFSZ (file size limit exceeded)",
 }
 
+# Exit codes that *may* be an OOM kill. ``-9``/``137`` is SIGKILL from subprocess vs the
+# shell convention; a pipeline, ``timeout`` or a wrapper ``sh -c`` can also collapse the
+# report to ``1`` with nothing but the shell's "Killed"/"Terminated" line (or no output at
+# all), which is why those shapes are candidates too. Candidates are only turned into a
+# claim after a cgroup verdict (tools/cgroup_oom.py) confirms it — the tables above stay
+# the honest "probably a signal death" note for everything else.
+_OOM_CANDIDATE_EXIT_CODES = frozenset({-9, 137})
+_OOM_COLLAPSED_NOTE_RE = re.compile(
+    # Shell notices come in two shapes: bare (``Killed`` / ``Terminated`` alone) and
+    # the shell's job notice, which always names the death-causing pid before the verb
+    # and may append the command line it was running:
+    #   /bin/bash: line 3: 12345 Killed  ./heavy
+    #   bash: line 1:  9412 Killed                  node --max-old-space-size=100 build.js
+    # Trailing text is only tolerated when the pid form matched, so prose such as
+    # "Killed process 123 while writing the report to disk" is never a candidate.
+    r"(?:^|\n)\s*(?:[\w./-]+:\s*)?(?:line \d+:\s*)?"
+    r"(?:\d+\s+(?:Killed|Terminated)(?:\s+\S[^\n]*)?|(?:Killed|Terminated)\s*)$"
+)
+_OOM_COLLAPSED_MAX_CHARS = 200
+
+_OOM_CONFIRMED_NOTE = (
+    "Command was killed by a cgroup OOM (its cgroup hit MemoryMax/MemorySwapMax, "
+    "{evidence}). This is resource exhaustion, NOT a logic error in the command: do NOT "
+    "re-run it unchanged — an identical run will be killed again. Reduce the footprint "
+    "(targeted test subset, --max-old-space-size, streaming/chunked input), or move the "
+    "work to terminal(background=true), which runs in its own memory-capped systemd scope."
+)
+
+
+def _looks_like_oom_exit(returncode: int, output: str) -> bool:
+    """Cheap pre-filter: could this exit be a cgroup OOM kill? Never a claim on its own."""
+    if returncode in _OOM_CANDIDATE_EXIT_CODES:
+        return True
+    if returncode != 1:
+        return False
+    stripped = (output or "").strip()
+    if not stripped:
+        return True
+    if len(stripped) > _OOM_COLLAPSED_MAX_CHARS:
+        return False
+    return _OOM_COLLAPSED_NOTE_RE.search(stripped) is not None
+
+
+def _confirmed_oom_note(returncode: int, output: str, result: dict, env: Any) -> Optional[str]:
+    """Replacement exit note when a cgroup OOM kill is *confirmed*, else None.
+
+    The probe is recorded before the spawn by LocalEnvironment (unit name for the
+    scoped path, ``memory.events`` counter baseline for the unscoped one). Backends
+    that record nothing — docker, ssh, daytona — simply return None and keep the
+    generic SIGKILL note: no evidence, no stronger claim.
+    """
+    if not _looks_like_oom_exit(returncode, output):
+        return None
+    with _quiet("cgroup oom confirmation"):
+        from tools.cgroup_oom import confirm_cgroup_oom
+        probe = result.get("cgroup_oom_probe")
+        if probe is None:
+            probe = getattr(env, "_cgroup_oom_probe", None)
+        confirmed, evidence = confirm_cgroup_oom(probe)
+        if confirmed:
+            return _OOM_CONFIRMED_NOTE.format(evidence=evidence)
+    return None
+
+
 
 def _interpret_signal_exit(exit_code: int) -> str | None:
     """Note for a signal-termination exit code, or None. Negative codes are
@@ -242,6 +306,12 @@ def finalize_foreground_result(
     output = redact_terminal_output(output.strip(), command) if output else ""
 
     exit_note = _interpret_exit_code(command, returncode)
+    # A confirmed cgroup OOM rewrites the note: the generic SIGKILL text ("often the
+    # kernel OOM killer, or an explicit kill -9") is a maybe, and a model that reads it
+    # as maybe re-runs the same command. Only confirmed evidence upgrades it.
+    oom_note = _confirmed_oom_note(returncode, output, result, env)
+    if oom_note:
+        exit_note = oom_note
     failure_hint = _failure_hint(command, returncode, output, exit_note)
     # cwd echo when the command changed directory (gated on the observation
     # flag so an interrupted command can't echo another session's cwd).
@@ -267,6 +337,7 @@ def finalize_foreground_result(
             returncode, output)),
         ("approval", approval_note or None),
         ("exit_code_meaning", exit_note or None),
+        ("oom_killed", True if oom_note else None),
         ("hint", failure_hint or None),
         ("sudo_auth_failed", True if sudo_auth_failed else None),
         ("sudo_cache_cleared", True if sudo_cache_cleared else None),

@@ -1028,6 +1028,9 @@ class LocalEnvironment(BaseEnvironment):
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict | None = None, persistent: bool = True):
         super().__init__(cwd=_resolve_local_initial_cwd(cwd), timeout=timeout, env=env, persist_env=persistent)
+        # Spawn-time evidence for a cgroup-OOM verdict on the last command; set by
+        # ``_record_cgroup_probe`` before every spawn (see tools/cgroup_oom.py).
+        self._cgroup_oom_probe: dict | None = None
         self.init_session()
 
     def get_temp_dir(self) -> str:
@@ -1096,6 +1099,44 @@ class LocalEnvironment(BaseEnvironment):
                 self.cwd, safe_cwd)
         self.cwd = safe_cwd
 
+    def _foreground_scope_argv(self, args: list[str]) -> list[str]:
+        """Isolate a foreground command in its own memory-capped cgroup when possible.
+
+        Best-effort by contract: any import/runtime failure returns *args* unchanged so
+        non-gateway, non-Linux and degraded hosts keep exactly today's Popen path.
+        """
+        try:
+            from tools.process_registry import foreground_scope_argv
+            return foreground_scope_argv(args)
+        except Exception:
+            logger.debug("foreground scope unavailable; running unscoped", exc_info=True)
+            return args
+
+    @staticmethod
+    def _scope_unit_of(argv: list[str]) -> str | None:
+        """``--unit`` value of a ``systemd-run`` wrapper argv, or None."""
+        for index, value in enumerate(argv[:-1]):
+            if value == "--unit":
+                return argv[index + 1]
+        return None
+
+    def _record_cgroup_probe(self, argv: list[str]) -> None:
+        """Snapshot what an OOM verdict for the NEXT command will need.
+
+        Taken before the spawn: the unit name (systemd's own per-command verdict) and
+        the enclosing cgroup's ``oom_kill`` counter (the delta for an unscoped run).
+        A missing value is "unknown", never zero — see tools/cgroup_oom.py.
+        """
+        self._cgroup_oom_probe = None
+        if _IS_WINDOWS:
+            return
+        with contextlib.suppress(Exception):
+            from tools.cgroup_oom import read_oom_kill_count
+            self._cgroup_oom_probe = {
+                "systemd_unit": self._scope_unit_of(argv),
+                "oom_kill_baseline": read_oom_kill_count(),
+            }
+
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
         bash = _find_bash()
@@ -1105,6 +1146,12 @@ class LocalEnvironment(BaseEnvironment):
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
+        # Only real commands are scoped: `login=True` runs once per session to build the
+        # environment snapshot, so paying systemd-run latency (and a scope) for it buys
+        # nothing, and a failure there would break every later command.
+        if not login:
+            args = self._foreground_scope_argv(args)
+        self._record_cgroup_probe(args)
         proc = subprocess.Popen(
             args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
