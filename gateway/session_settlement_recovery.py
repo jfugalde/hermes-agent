@@ -158,13 +158,55 @@ def gateway_refusal_boundary(captured, outcome):
     return error, {'error': error, 'error_surface': dict(surface)}
 
 
+def finalize_oneshot(authority, session_id: str) -> bool:
+    """End only a settled source='oneshot' session.
+
+    Mirrors finalize_webhook (gateway/platforms/webhook_ingress.py): the call is made
+    after the turn's settlement and publication so the completion is durable before the
+    row is stamped closed. Uses a simple source guard (no admission/epoch fence needed,
+    because a oneshot session is created for exactly one turn and is never re-routed or
+    reused by a later CLI invocation).
+
+    The end_reason 'oneshot_complete' is intentionally left out of _RECOVERABLE_END_REASONS
+    (hermes_state_common.py) so reopen_session cannot bring it back; the row drops out of
+    every "active sessions" query (ended_at IS NULL filters in hermes_state_gateway.py,
+    hermes_state_sessions.py etc).
+    """
+    import time
+    def write(conn):
+        return authority.db._end_and_bump(
+            conn,
+            "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=? AND ended_at IS NULL AND source='oneshot'",
+            (time.time(), 'oneshot_complete', session_id),
+            session_id,
+            'oneshot_complete'
+        )
+    return bool(authority.db._execute_write(write))
+
+
 def _release_media(authority, row):
-    """Terminal media cleanup: its own write txn after publication, never under the stream lock."""
+    """Terminal media cleanup: its own write txn after publication, never under the stream lock.
+
+    Also finalizes oneshot sessions here because _release_media is the single post-publication
+    hook that runs for every settled admission (both the worker commit_and_publish path and
+    the publish_terminal recovery path).
+    """
     try:
         from gateway.session_ingress_media import release_admission_media
         release_admission_media(authority.db, row['admission_id'])
     except Exception:
         logger.exception('Terminal media cleanup failed for admission %s', row['admission_id'])
+
+    # oneshot sessions (created by `hermes -z` / `chat --oneshot` via session.create + prompt.submit)
+    # never call detach / viewer close. End the row here (server side) right after its turn
+    # publishes, so the session does not remain with ended_at=NULL.
+    try:
+        sid = row['target_session_id']
+        if sid:
+            finalize_oneshot(authority, sid)
+    except Exception:
+        # Do not let a oneshot close failure surface or block media release.
+        logger.debug('oneshot finalization skipped for admission %s', row['admission_id'], exc_info=True)
 
 
 def commit_and_publish(authority, live, ref, row, response, outcome, captured, settlement):
