@@ -138,6 +138,34 @@ grep -rlE '<one principle per line>' ~/.hermes/skills --include=SKILL.md | head
 If a native port of the upstream already exists for the user's harness, name it as the
 alternative — and mark it unvetted unless you actually read it.
 
+## Adopting into Hermes profiles (when the verdict is "install anyway")
+
+Scope a bundle to a SUBSET of profiles: every profile inherits `~/.hermes/skills`
+via its own `skills.external_dirs`, so dropping the bundle there reaches every
+profile including the ones the user excluded. Instead put ONE physical copy
+(e.g. `~/.hermes/vendor/<bundle>/`) and add it as a second `skills.external_dirs`
+entry only in the configs that should see it. One copy to update, exclusion by
+config, no per-profile duplication.
+
+- Ship `VENDOR.md` next to the copy: upstream URL, pinned commit sha, license,
+  what was taken, what was deliberately not taken (hooks that double-route on a
+  host with native skill routing; host-specific command/manifest dirs), and the
+  command that re-validates the tree.
+- Keep the bundle intact when its SKILL.md files cross-reference each other and
+  its evals index them by name; renaming to dodge a collision breaks both.
+- `hermes -p <profile> skills list --enabled-only` proves the catalog resolves,
+  but `.skills_prompt_snapshot.json` is a prompt-budgeted SUBSET — a name absent
+  from it does not mean the skill is unreachable. Prove load with a one-shot:
+  `hermes -p <profile> -z "skill_view name <skill>, reply OK or MISSING"`, and
+  prove exclusion the same way on an excluded profile.
+- Only profiles with a real systemd unit need a restart (`apollo-gateway`,
+  `*-gateway`, `hermes-gateway-<name>`); worker profiles are spawned on demand
+  and read config at spawn. `hermes-gateway-restart-bypass` for the siblings; the
+  gateway you are running inside is the user's to restart.
+- In `~/.hermes`, `profiles/` is gitignored and the tracked `config.yaml` diverges
+  massively from the live one — commit the vendored tree alone via explicit paths
+  and document the wiring in `VENDOR.md`, or the commit sweeps foreign WIP.
+
 ## Deliverable shape
 
 Plain text for CLI. In order:
@@ -165,3 +193,5 @@ Plain text for CLI. In order:
 | Quoting the bundle's threshold as its behaviour | Grep every threshold (skill + tool README + defaults) and reconcile |
 | Judging a skill by its prose only | Grep for push/delete/force grants; permissions travel with the skill |
 | Reviewing in the abstract | Every claim in the verdict must come from a command you ran |
+| A skill missing from the prompt snapshot read as "not installed" | The snapshot is a budgeted subset; probe with `skill_view` in a one-shot per profile |
+| Committing the runner config next to the vendored tree | `profiles/` is gitignored and tracked `config.yaml` carries heavy local drift — stage the tree alone by explicit path |
