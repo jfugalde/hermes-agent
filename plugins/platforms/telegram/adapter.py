@@ -4329,6 +4329,39 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             "send_model_picker", chat_id, metadata, build, thread_id=metadata.get("thread_id") if metadata else None,
             reply_to_mode=self._reply_to_mode)
 
+    async def _show_interactive_model_picker(self, msg, update):
+        """Bare /model → interactive picker (replaces text dump)."""
+        chat_id = str(getattr(getattr(msg, "chat", None), "id", 0))
+        try:
+            from hermes_cli.inventory import build_models_payload, load_picker_context
+            ctx = load_picker_context()
+            payload = build_models_payload(ctx, explicit_only=True, include_unconfigured=False,
+                                           picker_hints=True, max_models=100, canonical_order=True)
+            provs = payload.get("providers", [])
+            cur_m, cur_p = "grok-build-0.1", "xai-oauth"
+            for p in provs:
+                if p.get("is_current"):
+                    cur_p = p.get("slug", cur_p)
+                    cur_m = (p.get("models") or [{}])[0].get("id", cur_m)
+                    break
+
+            async def on_sel(_, mid, pslug):
+                cmd = f"/model {mid} --provider {pslug}"
+                try:
+                    ev = await self._build_triggered_event(msg, update, MessageType.TEXT)
+                    ev.text = cmd
+                    await self.handle_message(ev)
+                except Exception:
+                    pass
+                return f"Switched to {mid} ({pslug})"
+
+            meta = {"thread_id": getattr(msg, "message_thread_id", None)}
+            await self.send_model_picker(chat_id, provs, cur_m, cur_p, chat_id, on_sel, metadata=meta)
+        except Exception as e:
+            logger.error("model picker launch: %s", e, exc_info=True)
+            ev = await self._build_triggered_event(msg, update, MessageType.COMMAND)
+            await self.handle_message(ev)
+
     _PROVIDER_PAGE_SIZE = 10
 
     async def send_choice_picker(
@@ -6515,6 +6548,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             self._log_blocked_user(msg)
             return
         await self._ensure_forum_commands(msg)
+        text = (msg.text or "").strip()
+        if text.lower() == "/model":
+            await self._show_interactive_model_picker(msg, update)
+            return
         event = await self._build_triggered_event(msg, update, MessageType.COMMAND)
         # A >4096-char command paste arrives as a near-limit COMMAND chunk plus TEXT continuations; dispatching
         # immediately would orphan them. Near-limit commands go through text batching.
