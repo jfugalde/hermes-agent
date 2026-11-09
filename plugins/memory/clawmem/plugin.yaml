@@ -1,0 +1,16 @@
+name: clawmem
+version: 1.0.0
+description: "ClawMem — on-device hybrid memory with composite scoring, graph traversal, and lifecycle management. Requires clawmem binary and optionally clawmem serve."
+external_dependencies:
+  - name: clawmem
+    # `install` is executed with shell=True, so it must be a real shell command —
+    # a prose string like "See <url>" is run as a command and fails with
+    # "/bin/bash: line 1: See: command not found".
+    install: "cd ~/clawmem && bun install --production"
+    # `clawmem --version` is NOT a valid ClawMem command (exit 1:
+    # "Error: Unknown command: --version"). `clawmem status` exits 0 and
+    # confirms the binary resolves the real index DB.
+    check: "clawmem status"
+hooks:
+  - on_session_end
+  - on_pre_compress
