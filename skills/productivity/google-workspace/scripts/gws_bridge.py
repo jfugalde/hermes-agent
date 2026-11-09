@@ -2,6 +2,9 @@
 """Bridge between Hermes OAuth token and gws CLI.
 
 Refreshes the token if expired, then executes gws with the valid access token.
+Token selection follows the multi-account alias layer: ``--account ALIAS``
+may be passed as the first argument (or via ``$GOOGLE_WORKSPACE_ACCOUNT``);
+otherwise the default alias (or the legacy single token) is used.
 """
 import json
 import os
@@ -10,16 +13,29 @@ import sys
 from datetime import datetime, timezone, UTC
 from pathlib import Path
 
-# Ensure sibling modules (_hermes_home) are importable when run standalone.
+# Ensure sibling modules (_hermes_home, _accounts) are importable when run standalone.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from _hermes_home import get_hermes_home
+from _accounts import (
+    AccountError,
+    atomic_write_json,
+    ensure_dir,
+    file_lock,
+    lock_path_for,
+    resolve_token_path,
+)
 
 
 def get_token_path() -> Path:
-    return get_hermes_home() / "google_token.json"
+    """Resolve the token file for the selected account."""
+    alias = os.environ.get("GOOGLE_WORKSPACE_ACCOUNT", "").strip() or None
+    try:
+        return resolve_token_path(alias)
+    except AccountError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 def _normalize_authorized_user_payload(payload: dict) -> dict:
@@ -29,16 +45,18 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
     return normalized
 
 
-def refresh_token(token_data: dict) -> dict:
+def refresh_token(token_data: dict, token_file: Path | None = None) -> dict:
     """Refresh the access token using the refresh token."""
     import urllib.error
     import urllib.parse
     import urllib.request
 
+    token_file = token_file or get_token_path()
+
     required_keys = ["client_id", "client_secret", "refresh_token", "token_uri"]
     missing = [k for k in required_keys if k not in token_data]
     if missing:
-        print(f"ERROR: google_token.json is missing required fields: {', '.join(missing)}", file=sys.stderr)
+        print(f"ERROR: {token_file.name} is missing required fields: {', '.join(missing)}", file=sys.stderr)
         print("Please re-authenticate by running the Google Workspace setup script.", file=sys.stderr)
         sys.exit(1)
 
@@ -75,9 +93,14 @@ def refresh_token(token_data: dict) -> dict:
         tz=UTC,
     ).isoformat()
 
-    get_token_path().write_text(
-        json.dumps(_normalize_authorized_user_payload(token_data), indent=2), encoding="utf-8"
-    )
+    # Atomic, lock-guarded write so concurrent refreshes cannot corrupt the file.
+    ensure_dir(token_file.parent)
+    with file_lock(lock_path_for(token_file)):
+        atomic_write_json(
+            token_file,
+            _normalize_authorized_user_payload(token_data),
+            mode=0o600,
+        )
     return token_data
 
 
@@ -95,22 +118,40 @@ def get_valid_token() -> str:
         exp_dt = datetime.fromisoformat(expiry)
         now = datetime.now(UTC)
         if now >= exp_dt:
-            token_data = refresh_token(token_data)
+            token_data = refresh_token(token_data, token_path)
 
     return token_data["token"]
 
 
 def main():
     """Refresh token if needed, then exec gws with remaining args."""
-    if len(sys.argv) < 2:
-        print("Usage: gws_bridge.py <gws args...>", file=sys.stderr)
+    argv = sys.argv[1:]
+
+    # Optional leading "--account ALIAS" / "--account=ALIAS" selector.
+    alias = os.environ.get("GOOGLE_WORKSPACE_ACCOUNT", "").strip()
+    if argv and argv[0] == "--account":
+        if len(argv) < 2:
+            print("ERROR: --account requires an alias", file=sys.stderr)
+            sys.exit(1)
+        alias = argv[1]
+        argv = argv[2:]
+    elif argv and argv[0].startswith("--account="):
+        alias = argv[0].split("=", 1)[1]
+        argv = argv[1:]
+
+    if not argv:
+        print("Usage: gws_bridge.py [--account ALIAS] <gws args...>", file=sys.stderr)
         sys.exit(1)
+
+    if alias:
+        os.environ["GOOGLE_WORKSPACE_ACCOUNT"] = alias
 
     access_token = get_valid_token()
     env = os.environ.copy()
     env["GOOGLE_WORKSPACE_CLI_TOKEN"] = access_token
+    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(get_token_path())
 
-    result = subprocess.run(["gws"] + sys.argv[1:], env=env, check=False)
+    result = subprocess.run(["gws"] + argv, env=env, check=False)
     sys.exit(result.returncode)
 
 

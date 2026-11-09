@@ -31,16 +31,55 @@ from datetime import datetime, timedelta, timezone, UTC
 from email.mime.text import MIMEText
 from pathlib import Path
 
-# Ensure sibling modules (_hermes_home) are importable when run standalone.
+# Ensure sibling modules (_hermes_home, _accounts) are importable when run standalone.
 _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import _accounts
+from _accounts import (
+    AccountError,
+    atomic_write_json,
+    ensure_dir,
+    file_lock,
+    lock_path_for,
+    resolve_token_path,
+)
 from _hermes_home import get_hermes_home
 
 HERMES_HOME = get_hermes_home()
-TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+
+# The account alias selected for this run (None => default / legacy token).
+_ACCOUNT_ALIAS = None
+# Cached resolved token path.
+_TOKEN_PATH = None
+
+
+def set_account_alias(alias: str | None) -> None:
+    """Select the Google account alias used by this invocation."""
+    global _ACCOUNT_ALIAS, _TOKEN_PATH
+    _ACCOUNT_ALIAS = alias
+    _TOKEN_PATH = None
+
+
+def _token_path() -> Path:
+    """Resolve (and cache) the token file for the selected account."""
+    global _TOKEN_PATH
+    if _TOKEN_PATH is None:
+        try:
+            _TOKEN_PATH = resolve_token_path(_ACCOUNT_ALIAS)
+        except AccountError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+    return _TOKEN_PATH
+
+
+def _write_token(path: Path, payload: dict) -> None:
+    """Persist a refreshed token atomically, under the refresh lock."""
+    ensure_dir(path.parent)
+    with file_lock(lock_path_for(path)):
+        atomic_write_json(path, payload, mode=0o600)
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -62,7 +101,8 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 
 
 def _ensure_authenticated():
-    if not TOKEN_PATH.exists():
+    token_path = _token_path()
+    if not token_path.exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
         sys.exit(1)
@@ -70,7 +110,7 @@ def _ensure_authenticated():
 
 def _stored_token_scopes() -> list[str]:
     try:
-        data = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_token_path().read_text(encoding="utf-8"))
     except Exception:
         return list(SCOPES)
     scopes = data.get("scopes")
@@ -88,7 +128,7 @@ def _gws_binary() -> str | None:
 
 def _gws_env() -> dict[str, str]:
     env = os.environ.copy()
-    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
+    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(_token_path())
     return env
 
 
@@ -250,14 +290,12 @@ def get_credentials():
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), _stored_token_scopes())
+    creds = Credentials.from_authorized_user_file(str(_token_path()), _stored_token_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        TOKEN_PATH.write_text(
-            json.dumps(
-                _normalize_authorized_user_payload(json.loads(creds.to_json())),
-                indent=2,
-            ), encoding="utf-8"
+        _write_token(
+            _token_path(),
+            _normalize_authorized_user_payload(json.loads(creds.to_json())),
         )
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
@@ -631,24 +669,35 @@ def calendar_delete(args):
 # =========================================================================
 
 
+def _drive_list_params(args, query: str) -> dict:
+    """Build the drive files.list params, including shared-drive support."""
+    params = {
+        "q": query,
+        "pageSize": args.max,
+        "fields": "files(id, name, mimeType, modifiedTime, webViewLink)",
+        "corpora": "allDrives",
+        "includeItemsFromAllDrives": True,
+        "supportsAllDrives": True,
+    }
+    drive_id = getattr(args, "drive_id", "")
+    if drive_id:
+        params["corpora"] = "drive"
+        params["driveId"] = drive_id
+    return params
+
+
 def drive_search(args):
     query = args.query if args.raw_query else f"fullText contains '{args.query}'"
     if _gws_binary():
         results = _run_gws(
             ["drive", "files", "list"],
-            params={
-                "q": query,
-                "pageSize": args.max,
-                "fields": "files(id, name, mimeType, modifiedTime, webViewLink)",
-            },
+            params=_drive_list_params(args, query),
         )
         print(json.dumps(results.get("files", []), indent=2, ensure_ascii=False))
         return
 
     service = build_service("drive", "v3")
-    results = service.files().list(
-        q=query, pageSize=args.max, fields="files(id, name, mimeType, modifiedTime, webViewLink)",
-    ).execute()
+    results = service.files().list(**_drive_list_params(args, query)).execute()
     files = results.get("files", [])
     print(json.dumps(files, indent=2, ensure_ascii=False))
 
@@ -659,13 +708,15 @@ def drive_get(args):
     if _gws_binary():
         result = _run_gws(
             ["drive", "files", "get"],
-            params={"fileId": args.file_id, "fields": fields},
+            params={"fileId": args.file_id, "fields": fields, "supportsAllDrives": True},
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
 
     service = build_service("drive", "v3")
-    result = service.files().get(fileId=args.file_id, fields=fields).execute()
+    result = service.files().get(
+        fileId=args.file_id, fields=fields, supportsAllDrives=True,
+    ).execute()
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -691,6 +742,7 @@ def drive_upload(args):
         body=metadata,
         media_body=media,
         fields="id, name, mimeType, webViewLink",
+        supportsAllDrives=True,
     ).execute()
     print(json.dumps({
         "status": "uploaded",
@@ -710,7 +762,9 @@ def drive_download(args):
     service = build_service("drive", "v3")
 
     # Look up the file to decide download vs export.
-    meta = service.files().get(fileId=args.file_id, fields="id, name, mimeType").execute()
+    meta = service.files().get(
+        fileId=args.file_id, fields="id, name, mimeType", supportsAllDrives=True,
+    ).execute()
     mime = meta.get("mimeType", "")
     name = meta.get("name", args.file_id)
 
@@ -729,9 +783,11 @@ def drive_download(args):
         default_ext = native_export_map[mime][1]
         if not args.output and not out_path.suffix:
             out_path = out_path.with_suffix(default_ext)
-        request = service.files().export_media(fileId=args.file_id, mimeType=export_mime)
+        request = service.files().export_media(
+            fileId=args.file_id, mimeType=export_mime, supportsAllDrives=True,
+        )
     else:
-        request = service.files().get_media(fileId=args.file_id)
+        request = service.files().get_media(fileId=args.file_id, supportsAllDrives=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fh = io.FileIO(str(out_path), "wb")
@@ -761,7 +817,7 @@ def drive_create_folder(args):
     if _gws_binary():
         result = _run_gws(
             ["drive", "files", "create"],
-            params={"fields": "id, name, webViewLink"},
+            params={"fields": "id, name, webViewLink", "supportsAllDrives": True},
             body=body,
         )
         print(json.dumps({
@@ -773,7 +829,9 @@ def drive_create_folder(args):
         return
 
     service = build_service("drive", "v3")
-    result = service.files().create(body=body, fields="id, name, webViewLink").execute()
+    result = service.files().create(
+        body=body, fields="id, name, webViewLink", supportsAllDrives=True,
+    ).execute()
     print(json.dumps({
         "status": "created",
         "id": result["id"],
@@ -804,6 +862,7 @@ def drive_share(args):
             params={
                 "fileId": args.file_id,
                 "sendNotificationEmail": args.notify,
+                "supportsAllDrives": True,
             },
             body=permission,
         )
@@ -822,6 +881,7 @@ def drive_share(args):
         body=permission,
         sendNotificationEmail=args.notify,
         fields="id",
+        supportsAllDrives=True,
     ).execute()
     print(json.dumps({
         "status": "shared",
@@ -836,11 +896,14 @@ def drive_delete(args):
     """Trash or permanently delete a Drive file. Defaults to trash (reversible)."""
     if args.permanent:
         if _gws_binary():
-            _run_gws(["drive", "files", "delete"], params={"fileId": args.file_id})
+            _run_gws(
+                ["drive", "files", "delete"],
+                params={"fileId": args.file_id, "supportsAllDrives": True},
+            )
             print(json.dumps({"status": "deleted", "fileId": args.file_id, "permanent": True}))
             return
         service = build_service("drive", "v3")
-        service.files().delete(fileId=args.file_id).execute()
+        service.files().delete(fileId=args.file_id, supportsAllDrives=True).execute()
         print(json.dumps({"status": "deleted", "fileId": args.file_id, "permanent": True}))
         return
 
@@ -849,14 +912,16 @@ def drive_delete(args):
     if _gws_binary():
         _run_gws(
             ["drive", "files", "update"],
-            params={"fileId": args.file_id},
+            params={"fileId": args.file_id, "supportsAllDrives": True},
             body=body,
         )
         print(json.dumps({"status": "trashed", "fileId": args.file_id, "permanent": False}))
         return
 
     service = build_service("drive", "v3")
-    service.files().update(fileId=args.file_id, body=body).execute()
+    service.files().update(
+        fileId=args.file_id, body=body, supportsAllDrives=True,
+    ).execute()
     print(json.dumps({"status": "trashed", "fileId": args.file_id, "permanent": False}))
 
 
@@ -1145,8 +1210,48 @@ def _docs_insert_text(doc_id: str, text: str, index: int, tab_id: str | None = N
 # =========================================================================
 
 
+def _strip_account_flag(argv: list[str]) -> tuple[str | None, list[str]]:
+    """Remove ``--account ALIAS`` / ``--account=ALIAS`` from ``argv``.
+
+    The flag is accepted both before and after the subcommand, so it cannot
+    live in a single subparser.  Returns ``(alias, cleaned_argv)``.
+    """
+    alias = None
+    cleaned: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--account":
+            if index + 1 < len(argv) and not argv[index + 1].startswith("-"):
+                alias = argv[index + 1]
+                index += 2
+                continue
+            index += 1
+            continue
+        if token.startswith("--account="):
+            value = token.split("=", 1)[1]
+            if value:
+                alias = value
+            index += 1
+            continue
+        cleaned.append(token)
+        index += 1
+    return alias, cleaned
+
+
 def main():
+    # --account is accepted both before and after the subcommand, so it is
+    # stripped from argv before argparse sees it and applied globally.
+    alias, cleaned_argv = _strip_account_flag(sys.argv[1:])
+    sys.argv = [sys.argv[0], *cleaned_argv]
+
     parser = argparse.ArgumentParser(description="Google Workspace API for Hermes Agent")
+    parser.add_argument(
+        "--account",
+        metavar="ALIAS",
+        default=None,
+        help="Google account alias to use (accepted before or after the subcommand)",
+    )
     sub = parser.add_subparsers(dest="service", required=True)
 
     # --- Gmail ---
@@ -1221,10 +1326,12 @@ def main():
     p.add_argument("query")
     p.add_argument("--max", type=int, default=10)
     p.add_argument("--raw-query", action="store_true", help="Use query as raw Drive API query")
+    p.add_argument("--drive-id", default="", help="Search a specific shared drive (team drive) by ID")
     p.set_defaults(func=drive_search)
 
     p = drv_sub.add_parser("get")
     p.add_argument("file_id")
+    p.add_argument("--drive-id", default="", help="Shared drive (team drive) ID the file belongs to")
     p.set_defaults(func=drive_get)
 
     p = drv_sub.add_parser("upload")
@@ -1232,17 +1339,20 @@ def main():
     p.add_argument("--name", default="", help="Override file name in Drive (defaults to local filename)")
     p.add_argument("--parent", default="", help="Parent folder ID")
     p.add_argument("--mime-type", default="", help="Override MIME type (auto-detected if omitted)")
+    p.add_argument("--drive-id", default="", help="Shared drive (team drive) ID to upload into")
     p.set_defaults(func=drive_upload)
 
     p = drv_sub.add_parser("download")
     p.add_argument("file_id")
     p.add_argument("--output", default="", help="Local output path (defaults to ./<name> in cwd)")
     p.add_argument("--export-mime", default="", help="Export MIME for Google-native files (overrides defaults: pdf for Docs/Slides, csv for Sheets, png for Drawings)")
+    p.add_argument("--drive-id", default="", help="Shared drive (team drive) ID the file belongs to")
     p.set_defaults(func=drive_download)
 
     p = drv_sub.add_parser("create-folder")
     p.add_argument("name")
     p.add_argument("--parent", default="", help="Parent folder ID (defaults to root)")
+    p.add_argument("--drive-id", default="", help="Shared drive (team drive) ID to create the folder in")
     p.set_defaults(func=drive_create_folder)
 
     p = drv_sub.add_parser("share")
@@ -1252,11 +1362,13 @@ def main():
     p.add_argument("--email", default="", help="Email address (required for type=user or type=group)")
     p.add_argument("--domain", default="", help="Domain (required for type=domain)")
     p.add_argument("--notify", action="store_true", help="Send notification email")
+    p.add_argument("--drive-id", default="", help="Shared drive (team drive) ID the file belongs to")
     p.set_defaults(func=drive_share)
 
     p = drv_sub.add_parser("delete")
     p.add_argument("file_id")
     p.add_argument("--permanent", action="store_true", help="Permanently delete (default is trash, which is reversible)")
+    p.add_argument("--drive-id", default="", help="Shared drive (team drive) ID the file belongs to")
     p.set_defaults(func=drive_delete)
 
     # --- Contacts ---
@@ -1314,6 +1426,7 @@ def main():
     p.set_defaults(func=docs_append)
 
     args = parser.parse_args()
+    set_account_alias(alias or args.account)
     args.func(args)
 
 
