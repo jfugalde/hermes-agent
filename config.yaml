@@ -920,16 +920,7 @@ plugins:
     - model-providers/cursor
   disabled: []
 mcp_servers:
-  shopify-dev:
-    command: /home/vivojf/.hermes/shopify-mcp/node_modules/.bin/shopify-dev-mcp
-    enabled: true
-  lsp:
-    command: node
-    args:
-      - /home/vivojf/.hermes/mcp-servers/lsp-bridge/dist/index.js
-      - --config
-      - /home/vivojf/.hermes/mcp-servers/lsp-bridge/config.json
-    enabled: true
+  # Host-absolute MCP binaries belong in the live ~/.hermes/config.yaml, not this fork.
   linear:
     url: https://mcp.linear.app/mcp
     auth: oauth

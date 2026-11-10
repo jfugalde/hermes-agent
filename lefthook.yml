@@ -33,3 +33,8 @@ pre-commit:
       root: tests-js/
       glob: "*.{js,ts,tsx}"
       run: npx eslint {staged_files}
+
+pre-push:
+  jobs:
+    - name: public-fork overlay guard
+      run: bash scripts/hermes-public-push-guard.sh
