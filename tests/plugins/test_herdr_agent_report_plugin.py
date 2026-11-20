@@ -211,14 +211,18 @@ class TestTurnLifecycle:
         (argv,) = _records(herdr_env.log)
         assert argv[0:6] == ["pane", "report-agent", "wT:p1",
                              "--source", "hermes-agent-report", "--agent"]
-        assert argv[6] == "hermes-agent"
+        # hermes.toml declares aliases = ["hermes-agent"]: reports naming an agent Herdr
+        # already owns come back {"type":"ok"} but are silently never applied, hence
+        # the plugin must label itself with a genuinely unclaimed name.
+        assert argv[6] == "hermes-report"
+        assert argv[6] not in ("hermes", "hermes-agent")
 
     def test_release_agent_argv(self, herdr_env):
         ctx = _register(_load_plugin())
         _fire(ctx, "on_session_finalize", **FINALIZE_KW)
         (argv,) = _records(herdr_env.log)
         assert argv[0:3] == ["pane", "release-agent", "wT:p1"]
-        assert argv[3:8] == ["--source", "hermes-agent-report", "--agent", "hermes-agent", "--seq"]
+        assert argv[3:8] == ["--source", "hermes-agent-report", "--agent", "hermes-report", "--seq"]
 
     def test_release_clears_dedupe_memory_for_next_session(self, herdr_env):
         ctx = _register(_load_plugin())

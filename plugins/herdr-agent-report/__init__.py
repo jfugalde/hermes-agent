@@ -6,8 +6,8 @@ near-identical, so the ``hermes`` detection manifest matches nothing and every p
 bypasses screen detection entirely and pushes lifecycle events through Herdr's documented
 custom-hook API (https://herdr.dev/tui/docs/add-herdr-support/):
 
-    herdr pane report-agent <PANE_ID> --source hermes-agent-report --agent hermes-agent --state ...
-    herdr pane release-agent <PANE_ID> --source hermes-agent-report --agent hermes-agent
+    herdr pane report-agent <PANE_ID> --source hermes-agent-report --agent hermes-report --state ...
+    herdr pane release-agent <PANE_ID> --source hermes-agent-report --agent hermes-report
 
 SOURCE / AGENT LABEL CHOICE (verified live against herdr 0.9.5)
 ===============================================================
@@ -16,9 +16,15 @@ that prefix) and an ``--agent`` that is "your own agent's name, not the name of 
 already supports". Both matter on 0.9.5: reports sent with ``--source herdr:hermes`` or with
 ``--agent hermes`` (a built-in kind) come back ``{"type":"ok"}`` but are silently never applied —
 ``pane get`` and ``agent list`` stay unchanged because the state is attributed to Herdr's own
-hermes integration. With a distinct source + non-built-in agent label, the same call takes
-effect immediately. Hence this plugin reports as source ``hermes-agent-report`` / agent
-``hermes-agent``; the pane shows a "hermes-agent" lifecycle instead of a dead "hermes" one.
+hermes integration. ``hermes-agent`` is not a safe fallback either: Herdr's own hermes
+detection manifest (``~/.local/state/herdr/agent-detection/remote/hermes.toml``) declares
+``aliases = ["hermes-agent"]``, so BOTH ``hermes`` and ``hermes-agent`` are names Herdr already
+owns — a report with ``--agent hermes-agent`` comes back ``{"type":"ok"}`` yet is silently
+never applied to pane state either (that is why a first attempt with that label showed
+idle/release transitions but never ``working``). With a distinct source + an agent label Herdr
+does not claim, the same call takes effect immediately. Hence this plugin reports as source
+``hermes-agent-report`` / agent ``hermes-report``; the pane shows a live "hermes-report"
+lifecycle instead of a dead one.
 
 STATE MAPPING — HOOK DISPATCH SEMANTICS VERIFIED IN CODE (not guessed)
 =====================================================================
@@ -74,7 +80,7 @@ import time
 
 __all__ = ["register"]
 
-_AGENT = "hermes-agent"
+_AGENT = "hermes-report"
 _SOURCE = "hermes-agent-report"
 _INTERACTIVE_PLATFORMS = {"cli", "tui", "desktop", "acp"}
 
