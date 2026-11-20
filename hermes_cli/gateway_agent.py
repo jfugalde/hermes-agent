@@ -681,6 +681,8 @@ class GatewayAgent:
                 persist_user_message = user_message
         text = persist_user_message if isinstance(persist_user_message, str) else user_message
         params = {"session_id": self.session_id, "submission_id": uuid.uuid4().hex, "text": text}
+        from hermes_cli.gateway_client import caller_pane_param
+        params.update(caller_pane_param())
         if attachments:
             params["attachments"] = attachments
         if isinstance(user_message, str) and user_message != text:

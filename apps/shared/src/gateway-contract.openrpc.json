@@ -32214,6 +32214,19 @@
             "default": null,
             "title": "Surface"
           },
+          "caller_pane": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caller Pane"
+          },
           "voice_context": {
             "anyOf": [
               {

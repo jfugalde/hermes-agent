@@ -9,6 +9,7 @@ post-turn follow-ups (queued prompt, goal continuation, notifications).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 
 from .method_ctx import HandlerRegistry, bind_module
@@ -1100,6 +1101,25 @@ def _reopen_routed_session_row(db, sid: str, session: dict) -> None:
         logger.debug("routing-provenance reopen failed for %s", session_id, exc_info=True)
 
 
+def _bind_caller_pane(agent, session: dict) -> None:
+    """Per turn: bind the submitting client's terminal pane (``prompt.submit`` ``caller_pane``,
+    stashed per submit by ``methods_prompt._stash_caller_pane``) so gateway-side hook reporting
+    carries the pane: turn-context hooks read ``agent._caller_pane`` as the ``pane_id`` kwarg
+    (agent/turn_context.py, agent/turn_finalizer.py) and approval hooks read the bound pane
+    context (tools/approval_context.py). Cleared when absent: a session later driven from a
+    pane-less client (desktop/web) must not keep reporting a stale pane. Never raises."""
+    pane = str(session.get("caller_pane") or "").strip()
+    try:
+        from tools.approval_context import bind_pane_context
+        bind_pane_context(pane)
+    except Exception:
+        pass  # approval context unavailable (bare tool imports); pane hooks simply lack it
+    try:
+        agent._caller_pane = pane
+    except Exception:
+        pass  # attribute-less agents: hook kwargs simply lack the pane
+
+
 def _run_prompt_submit(
     rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
@@ -1120,6 +1140,7 @@ def _run_prompt_submit(
     if admitted is None:
         return False
     images, agent = admitted
+    _bind_caller_pane(agent, session)
     from gateway.warning_notifications import diagnostic_turn_muted
     from agent.notification_presentation import notification_config_snapshot
     with _session_profile_runtime_scope(session):

@@ -285,6 +285,66 @@ class TestFailureResilience:
 
 
 # ---------------------------------------------------------------------------
+# Pane identity via hook kwargs (option B)
+# ---------------------------------------------------------------------------
+
+
+class TestPaneKwargIdentity:
+    """Gateway-side turn/approval hooks carry the pane as the ``pane_id`` kwarg (option B: the
+    submitting CLI's ``prompt.submit`` ``caller_pane`` param, bound per turn by the gateway).
+    The gateway process itself has no HERDR_* env, so the kwarg must work with the env gate unset."""
+
+    KW = {"session_id": "s1", "platform": INTERACTIVE_PLATFORM, "pane_id": "wT:p9"}
+
+    def test_kwarg_pane_reports_without_herdr_env(self, herdr_env, monkeypatch):
+        monkeypatch.delenv("HERDR_ENV", raising=False)
+        ctx = _register(_load_plugin())
+        _fire(ctx, "pre_llm_call", **self.KW)
+        (argv,) = _records(herdr_env.log)
+        assert argv[2] == "wT:p9"
+        assert _states(herdr_env.log) == ["working"]
+
+    def test_kwarg_pane_wins_over_env(self, herdr_env):
+        ctx = _register(_load_plugin())
+        _fire(ctx, "pre_llm_call", **self.KW)
+        _fire(ctx, "pre_llm_call", session_id="s1", platform=INTERACTIVE_PLATFORM)  # env path
+        assert _records(herdr_env.log)[0][2] == "wT:p9", "kwarg identity wins over HERDR_PANE_ID"
+
+    def test_blank_kwarg_falls_back_to_env(self, herdr_env):
+        ctx = _register(_load_plugin())
+        _fire(ctx, "pre_llm_call", session_id="s1", platform=INTERACTIVE_PLATFORM, pane_id="  ")
+        assert _records(herdr_env.log)[0][2] == "wT:p1"
+
+    def test_approval_hooks_carry_kwarg_pane_without_platform(self, herdr_env, monkeypatch):
+        monkeypatch.delenv("HERDR_ENV", raising=False)
+        ctx = _register(_load_plugin())
+        _fire(ctx, "pre_approval_request", session_key="sk", command="git push", pane_id="wT:p9")
+        _fire(ctx, "post_approval_response", session_key="sk", command="git push",
+              pane_id="wT:p9", choice="allow")
+        assert _states(herdr_env.log) == ["blocked", "working"]
+        assert all(argv[2] == "wT:p9" for argv in _records(herdr_env.log))
+
+    def test_panes_dedupe_independently(self, herdr_env):
+        ctx = _register(_load_plugin())
+        _fire(ctx, "pre_llm_call", **self.KW)
+        _fire(ctx, "pre_llm_call", session_id="s1", platform=INTERACTIVE_PLATFORM, pane_id="wT:p8")
+        _fire(ctx, "pre_llm_call", **self.KW)
+        assert _states(herdr_env.log) == ["working", "working"], \
+            "a different pane still reports; its own duplicate dedupes"
+
+    def test_release_clears_only_own_pane_dedupe(self, herdr_env):
+        ctx = _register(_load_plugin())
+        _fire(ctx, "pre_llm_call", **self.KW)
+        _fire(ctx, "pre_llm_call", session_id="s1", platform=INTERACTIVE_PLATFORM, pane_id="wT:p8")
+        _fire(ctx, "post_llm_call", **self.KW)
+        _fire(ctx, "on_session_finalize", session_id="s1", platform=INTERACTIVE_PLATFORM,
+              pane_id="wT:p9")
+        _fire(ctx, "pre_llm_call", session_id="s2", platform=INTERACTIVE_PLATFORM, pane_id="wT:p9")
+        assert _states(herdr_env.log) == ["working", "working", "idle", None, "working"], \
+            "only the released pane forgets its dedupe memory"
+
+
+# ---------------------------------------------------------------------------
 # Registration surface
 # ---------------------------------------------------------------------------
 

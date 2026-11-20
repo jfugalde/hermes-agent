@@ -501,6 +501,7 @@ def _apply_output_hooks(
             conversation_history=list(messages),
             model=agent.model,
             platform=platform,
+            pane_id=getattr(agent, "_caller_pane", None) or "",
             side_question_token=side_question_token,
         )
     return final_response, transformed, pre_transform

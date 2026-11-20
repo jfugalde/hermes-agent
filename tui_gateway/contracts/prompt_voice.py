@@ -34,6 +34,11 @@ class PromptSubmitParams(SessionParams):
     interrupted: bool | None = None  # client-side barge-in: the turn's model message carries the note
     queued: bool | None = None  # client queue drain — the busy path must hold it, never redirect/steer
     surface: str | None = None  # a ClientSurface value; unknown values clear the surface
+    # The submitting client's terminal pane identity (e.g. a Herdr pane id), information-only:
+    # it never touches the model turn; the gateway surfaces it to turn/approval/session hooks as
+    # the ``pane_id`` kwarg so gateway-side plugins can report per-pane lifecycle state (the
+    # gateway process itself has no HERDR_* env). Client-side only under HERDR_ENV=1.
+    caller_pane: str | None = Field(default=None, max_length=64)
     voice_context: str | None = None  # recent spoken transcript, model input only (voice-live)
     voice_turn: bool | None = None  # a spoken voice-conversation turn: runs on auxiliary.voice_chat
     # Desktop-generated large-paste preview (first ~1000 chars); TITLE input only, never the model turn.

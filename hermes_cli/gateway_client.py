@@ -315,6 +315,16 @@ def outside_restart_wait():
         _REFUSE_RESTART_WAIT.reset(token)
 
 
+def caller_pane_param() -> dict:
+    """The ``prompt.submit`` ``caller_pane`` param for THIS client process, when it runs inside a
+    Herdr pane (``{}`` otherwise). Gateway-side turn/approval hooks have no HERDR_* env, so the
+    submitting CLI forwards the pane identity for per-pane lifecycle reporting."""
+    if os.environ.get("HERDR_ENV") != "1":
+        return {}
+    pane = os.environ.get("HERDR_PANE_ID", "").strip()
+    return {"caller_pane": pane} if pane else {}
+
+
 @asynccontextmanager
 async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 1024):
     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is

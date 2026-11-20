@@ -54,17 +54,21 @@ in multi-step tool-loop turns:
 
 PLATFORM GATE
 =============
-This plugin only matters inside a Herdr pane, so it is hard-gated on ``HERDR_ENV=1`` and a
-non-empty ``HERDR_PANE_ID`` (env Herdr injects into managed panes). Additionally, when a hook's
+This plugin only matters inside a Herdr pane. Pane identity resolves per hook as the
+``pane_id`` kwarg (option B: the submitting CLI client's ``prompt.submit`` ``caller_pane`` param,
+bound per turn by the gateway; the gateway process itself has no HERDR_* env) and falls back to
+the process env — ``HERDR_ENV=1`` plus a non-empty ``HERDR_PANE_ID`` — for hooks that fire inside
+the CLI process (non-gateway runs). Additionally, when a hook's
 kwargs carry a ``platform`` value (the turn hooks always do), it must be one of the interactive
 surfaces {"cli", "tui", "desktop", "acp"}; hooks that fire without a platform kwarg (the approval
-hooks) are not platform-gated — the HERDR_ENV gate is their boundary.
+hooks) are not platform-gated — pane identity is their boundary.
 
 SAFETY RULES
 ============
 * Monotonic ``--seq`` per process (``time.time_ns()`` bumped past the previous value under a
   lock) so late/out-of-order herdr CLI calls cannot overwrite a newer state.
-* Consecutive identical states are deduped, so redundant hook firings never spam herdr.
+* Consecutive identical states are deduped PER PANE (the identity that resolved the hook), so
+  redundant hook firings never spam herdr and two panes driving one gateway stay independent.
 * A failed (non-zero / raising) report reverts the dedupe memory so the next hook retry sends.
 * Every hook call is wrapped: subprocess timeout 1s, stdout/stderr discarded, all exceptions
   swallowed — a broken ``herdr`` binary can never break the agent loop.
@@ -91,12 +95,22 @@ _MESSAGES = {
 }
 
 _STATE_LOCK = threading.Lock()
-_LAST_REPORTED: str | None = None  # last state successfully pushed to herdr, for dedupe
+_LAST_REPORTED: dict[str, str] = {}  # pane id -> last state successfully pushed to herdr, for dedupe
 _LAST_SEQ = 0
 
 
-def _pane_id() -> str | None:
-    """Return the Herdr pane id, or None when not running inside a Herdr-managed pane."""
+def _pane_identity(kwargs: dict) -> str | None:
+    """Return the Herdr pane id for this hook call, or None when absent.
+
+    Turn/approval hooks run inside the GATEWAY process, whose env carries no HERDR_* (that env is
+    Herdr's injection into the submitting client's pane). Option B plumbs the identity the other
+    way: the CLI client sends the ``prompt.submit`` ``caller_pane`` param, the gateway binds it per
+    turn (tui_gateway/prompt_turn.py) and exposes it to these hooks as the ``pane_id`` kwarg, which
+    always wins here. The process env stays the fallback for hooks fired inside the CLI process
+    itself (non-gateway runs), which never carry the kwarg."""
+    pane = kwargs.get("pane_id")
+    if isinstance(pane, str) and pane.strip():
+        return pane.strip()
     if os.environ.get("HERDR_ENV") != "1":
         return None
     return os.environ.get("HERDR_PANE_ID", "").strip() or None
@@ -127,31 +141,32 @@ def _run_herdr(args: list[str]) -> bool:
     return getattr(result, "returncode", 1) == 0
 
 
-def _claim_state(state: str) -> tuple[bool, str | None]:
-    """Atomically switch the dedupe memory to *state* when it differs from the last
-    successfully reported state. Returns ``(claimed, previous)``: claimed is False when the
-    identical state was already reported (nothing to send)."""
-    global _LAST_REPORTED
+def _claim_state(pane_id: str, state: str) -> tuple[bool, str | None]:
+    """Atomically switch the per-pane dedupe memory to *state* when it differs from the last
+    successfully reported state for that pane. Returns ``(claimed, previous)``: claimed is False
+    when the identical state was already reported (nothing to send). Keyed per pane: two panes
+    driving the same gateway must dedupe independently."""
     with _STATE_LOCK:
-        previous = _LAST_REPORTED
+        previous = _LAST_REPORTED.get(pane_id)
         if state == previous:
             return False, previous
-        _LAST_REPORTED = state
+        _LAST_REPORTED[pane_id] = state
         return True, previous
 
 
-def _rollback_state(state: str, previous: str | None) -> None:
+def _rollback_state(pane_id: str, state: str, previous: str | None) -> None:
     """Undo a claim whose herdr call failed, so the next hook retries sending."""
-    global _LAST_REPORTED
     with _STATE_LOCK:
-        if _LAST_REPORTED == state:
-            _LAST_REPORTED = previous
+        if _LAST_REPORTED.get(pane_id) == state:
+            if previous is None:
+                _LAST_REPORTED.pop(pane_id, None)
+            else:
+                _LAST_REPORTED[pane_id] = previous
 
 
-def _clear_state() -> None:
-    global _LAST_REPORTED
+def _clear_state(pane_id: str) -> None:
     with _STATE_LOCK:
-        _LAST_REPORTED = None
+        _LAST_REPORTED.pop(pane_id, None)
 
 
 def _platform_allowed(kwargs: dict) -> bool:
@@ -170,11 +185,11 @@ def _report_state(state: str, **kwargs: object) -> None:
     try:
         if not _platform_allowed(kwargs):
             return
-        claimed, previous = _claim_state(state)
-        if not claimed:
-            return
-        pane_id = _pane_id()
+        pane_id = _pane_identity(kwargs)
         if pane_id is None:
+            return
+        claimed, previous = _claim_state(pane_id, state)
+        if not claimed:
             return
         ok = _run_herdr([
             "pane", "report-agent", pane_id,
@@ -185,7 +200,7 @@ def _report_state(state: str, **kwargs: object) -> None:
             "--message", _MESSAGES.get(state, state),
         ])
         if not ok:
-            _rollback_state(state, previous)
+            _rollback_state(pane_id, state, previous)
     except Exception:
         return
 
@@ -195,7 +210,7 @@ def _release_agent(**kwargs: object) -> None:
     try:
         if not _platform_allowed(kwargs):
             return
-        pane_id = _pane_id()
+        pane_id = _pane_identity(kwargs)
         if pane_id is None:
             return
         if _run_herdr([
@@ -204,7 +219,7 @@ def _release_agent(**kwargs: object) -> None:
             "--agent", _AGENT,
             "--seq", str(_next_seq()),
         ]):
-            _clear_state()  # a fresh session in this pane must report working again
+            _clear_state(pane_id)  # a fresh session in this pane must report working again
     except Exception:
         return
 

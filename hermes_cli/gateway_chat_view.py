@@ -343,8 +343,10 @@ class GatewayChatView:
     async def submit(self, text):
         self.mutations.retire(self.session_id)
         sid, gaps = self.session_id, self.gaps
+        from hermes_cli.gateway_client import caller_pane_param
         receipt = await self.client.rpc("prompt.submit", session_id=self.session_id,
                                         input_id=uuid.uuid4().hex, text=text,
+                                        **caller_pane_param(),
                                         **({"finite": True} if self.finite else {}),
                                         **({"unattended": True} if self.finite and self.unattended else {}))
         if (receipt or {}).get("voice_stopped") is True:
