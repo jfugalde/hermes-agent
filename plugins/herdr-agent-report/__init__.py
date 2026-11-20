@@ -4,10 +4,21 @@ Herdr cannot classify Hermes panes by screen scraping: idle and working Hermes t
 near-identical, so the ``hermes`` detection manifest matches nothing and every pane reports
 ``state: idle`` forever (``fallback_reason: default_known_agent_idle_fallback``). This plugin
 bypasses screen detection entirely and pushes lifecycle events through Herdr's documented
-custom-hook API:
+custom-hook API (https://herdr.dev/tui/docs/add-herdr-support/):
 
-    herdr pane report-agent <PANE_ID> --source <ID> --agent hermes --state idle|working|blocked
-    herdr pane release-agent <PANE_ID> --source <ID> --agent hermes
+    herdr pane report-agent <PANE_ID> --source hermes-agent-report --agent hermes-agent --state ...
+    herdr pane release-agent <PANE_ID> --source hermes-agent-report --agent hermes-agent
+
+SOURCE / AGENT LABEL CHOICE (verified live against herdr 0.9.5)
+===============================================================
+The docs require ``--source`` that does not start with ``herdr:`` (built-in integrations own
+that prefix) and an ``--agent`` that is "your own agent's name, not the name of an agent Herdr
+already supports". Both matter on 0.9.5: reports sent with ``--source herdr:hermes`` or with
+``--agent hermes`` (a built-in kind) come back ``{"type":"ok"}`` but are silently never applied —
+``pane get`` and ``agent list`` stay unchanged because the state is attributed to Herdr's own
+hermes integration. With a distinct source + non-built-in agent label, the same call takes
+effect immediately. Hence this plugin reports as source ``hermes-agent-report`` / agent
+``hermes-agent``; the pane shows a "hermes-agent" lifecycle instead of a dead "hermes" one.
 
 STATE MAPPING — HOOK DISPATCH SEMANTICS VERIFIED IN CODE (not guessed)
 =====================================================================
@@ -63,8 +74,8 @@ import time
 
 __all__ = ["register"]
 
-_AGENT = "hermes"
-_SOURCE = "herdr:hermes"
+_AGENT = "hermes-agent"
+_SOURCE = "hermes-agent-report"
 _INTERACTIVE_PLATFORMS = {"cli", "tui", "desktop", "acp"}
 
 _MESSAGES = {

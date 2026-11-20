@@ -210,15 +210,15 @@ class TestTurnLifecycle:
         _fire(ctx, "pre_llm_call", **TURN_KW)
         (argv,) = _records(herdr_env.log)
         assert argv[0:6] == ["pane", "report-agent", "wT:p1",
-                             "--source", "herdr:hermes", "--agent"]
-        assert argv[6] == "hermes"
+                             "--source", "hermes-agent-report", "--agent"]
+        assert argv[6] == "hermes-agent"
 
     def test_release_agent_argv(self, herdr_env):
         ctx = _register(_load_plugin())
         _fire(ctx, "on_session_finalize", **FINALIZE_KW)
         (argv,) = _records(herdr_env.log)
         assert argv[0:3] == ["pane", "release-agent", "wT:p1"]
-        assert argv[3:8] == ["--source", "herdr:hermes", "--agent", "hermes", "--seq"]
+        assert argv[3:8] == ["--source", "hermes-agent-report", "--agent", "hermes-agent", "--seq"]
 
     def test_release_clears_dedupe_memory_for_next_session(self, herdr_env):
         ctx = _register(_load_plugin())
