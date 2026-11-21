@@ -282,3 +282,33 @@ class TestSessionBoundaryPaneKwarg:
                             lambda **kw: captured.update(kw) or [])
         session_lifecycle._notify_session_boundary("on_session_finalize", "s1", "cli")
         assert captured["pane_id"] == ""
+
+
+class TestCallerPaneFallback:
+    """A newer client must never be blocked by an older owner: ``caller_pane`` is advisory, and its
+    validation refusal happens before any admission, so the submit is replayed without it."""
+
+    def _err(self, reason, code=None):
+        from hermes_cli.gateway_client import GatewayRPCError
+
+        return GatewayRPCError(reason, code)
+
+    def test_invalid_params_is_a_pane_refusal(self):
+        from hermes_cli.gateway_client import caller_pane_rejected
+
+        assert caller_pane_rejected(self._err("invalid_params")) is True
+        assert caller_pane_rejected(self._err("request_failed", -32602)) is True
+
+    def test_real_verdicts_are_not_pane_refusals(self):
+        from hermes_cli.gateway_client import caller_pane_rejected
+
+        assert caller_pane_rejected(self._err("session_busy")) is False
+        assert caller_pane_rejected(self._err("draining")) is False
+        assert caller_pane_rejected(RuntimeError("invalid_params")) is False
+
+    def test_without_caller_pane_keeps_everything_else(self):
+        from hermes_cli.gateway_client import without_caller_pane
+
+        params = {"session_id": "sW:s1", "text": "hi", "caller_pane": PANE, "queued": True}
+        assert without_caller_pane(params) == {"session_id": "sW:s1", "text": "hi", "queued": True}
+        assert params["caller_pane"] == PANE  # not mutated

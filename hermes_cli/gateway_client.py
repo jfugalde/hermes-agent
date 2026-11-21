@@ -325,6 +325,22 @@ def caller_pane_param() -> dict:
     return {"caller_pane": pane} if pane else {}
 
 
+def caller_pane_rejected(exc) -> bool:
+    """True when the owner refused a submit ONLY because it does not know ``caller_pane``.
+
+    A newer CLI talking to an older gateway (or one started before the contract gained the field)
+    fails param validation with ``invalid_params`` *before* anything is admitted, so the submit can be
+    replayed without the advisory pane. Every other refusal is a real verdict and stays raised."""
+    if not isinstance(exc, GatewayRPCError):
+        return False
+    return "invalid_param" in (str(exc) or "") or getattr(exc, "code", None) == -32602
+
+
+def without_caller_pane(params: dict) -> dict:
+    """``params`` minus the advisory ``caller_pane`` (replay payload for an older owner)."""
+    return {key: value for key, value in params.items() if key != "caller_pane"}
+
+
 @asynccontextmanager
 async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 1024):
     """Attach to this home's owner. ``endpoint``: an already-discovered ready owner to dial as-is

@@ -43,14 +43,29 @@ def submit_queued(cli, store, text: str) -> str:
     admission it already holds (``admit_session_input`` keys it by principal, session and request id),
     so the prompt is queued exactly once. Still no answer: :class:`QueueOutcomeUnknown`.
     """
-    from hermes_cli.gateway_client import NOT_SENT, GatewayRPCError, caller_pane_param
+    from hermes_cli.gateway_client import (
+        NOT_SENT,
+        GatewayRPCError,
+        caller_pane_param,
+        caller_pane_rejected,
+        without_caller_pane,
+    )
     submission = uuid.uuid4().hex
+    pane = caller_pane_param()
+    params = {"session_id": cli.session_id, "submission_id": submission, "text": text, "queued": True, **pane}
+    receipt = None
     for attempt in (1, 2):
         try:
-            receipt = store.call("prompt.submit", session_id=cli.session_id, submission_id=submission,
-                                 text=text, queued=True, **caller_pane_param())
+            receipt = store.call("prompt.submit", **params)
             break
-        except GatewayRPCError:
+        except GatewayRPCError as exc:
+            # An owner older than the caller_pane contract refuses at validation, before any
+            # admission: replay once without the advisory pane instead of failing the queue.
+            if pane and caller_pane_rejected(exc):
+                params = without_caller_pane(params)
+                pane = {}
+                receipt = store.call("prompt.submit", **params)
+                break
             raise
         except GatewayClientError as exc:
             if str(exc) == NOT_SENT and attempt == 1:
