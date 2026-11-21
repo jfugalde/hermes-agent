@@ -33,6 +33,11 @@ _approval_session_id: contextvars.ContextVar[str] = _ctx("approval_session_id")
 # it onto the non-interactive auto-approve path so a dangerous command runs without the approval callback firing
 # (GHSA-96vc-wcxf-jjff). None = unset → env fallback.
 _hermes_interactive_ctx: contextvars.ContextVar[str | None] = _ctx("hermes_interactive", None)
+# The submitting client's terminal pane id (prompt.submit ``caller_pane``), bound per turn on the
+# turn thread (tui_gateway.prompt_turn._bind_caller_pane). Approval hooks carry it as ``pane_id``
+# so pane-scoped plugin reporting (Herdr lifecycle state) can mark blocked/working on the right
+# pane when the turn runs gateway-side — the gateway process has no HERDR_* env to fall back to.
+_approval_pane_id: contextvars.ContextVar[str] = _ctx("approval_pane_id", "")
 
 
 def set_hermes_interactive_context(interactive: bool) -> contextvars.Token:
@@ -43,6 +48,17 @@ def set_hermes_interactive_context(interactive: bool) -> contextvars.Token:
 def reset_hermes_interactive_context(token: contextvars.Token) -> None:
     """Restore the prior value from :func:`set_hermes_interactive_context`."""
     _hermes_interactive_ctx.reset(token)
+
+
+def bind_pane_context(pane_id: str) -> None:
+    """Bind the submitting client's terminal pane (``caller_pane``) to the current context;
+    approval hooks surface it as the ``pane_id`` kwarg."""
+    _approval_pane_id.set(pane_id or "")
+
+
+def current_pane_id() -> str:
+    """The submitting client's terminal pane bound for this context, or ``""``."""
+    return _approval_pane_id.get()
 
 
 def _is_interactive_cli() -> bool:
@@ -67,6 +83,7 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
         kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
         if _approval_session_id.get():
             kwargs.setdefault("session_id", _approval_session_id.get())
+        kwargs.setdefault("pane_id", _approval_pane_id.get())
         invoke_hook(hook_name, **kwargs)
     except Exception as exc:
         # invoke_hook() swallows per-callback errors; this is the dispatch layer itself failing.

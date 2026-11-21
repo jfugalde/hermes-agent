@@ -2747,6 +2747,7 @@ export interface PromptSubmitParams {
   interrupted?: boolean | null
   queued?: boolean | null
   surface?: string | null
+  caller_pane?: string | null
   voice_context?: string | null
   voice_turn?: boolean | null
   title_preview?: string | null
@@ -5177,6 +5178,7 @@ export interface CanonicalSubmitParams {
   submission_id?: string | null
   input_id?: string | null
   queued?: boolean
+  caller_pane?: string | null
   attachments?: CanonicalAttachment[] | null
   finite?: boolean
   unattended?: boolean

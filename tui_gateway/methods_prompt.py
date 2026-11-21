@@ -671,6 +671,15 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
     return error
 
 
+def _stash_caller_pane(session: dict, params: dict) -> None:
+    """Stash the submitting client's terminal pane (``prompt.submit`` ``caller_pane``) on the
+    session record: information_only for hook reporting, cleared per submit like client_surface
+    (a session later driven pane-less must not keep a stale pane). Read per turn by
+    ``tui_gateway.prompt_turn._bind_caller_pane`` and surfaced to hooks as ``pane_id``."""
+    raw = params.get("caller_pane")
+    session["caller_pane"] = raw.strip()[:64] if isinstance(raw, str) and raw.strip() else ""
+
+
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
     hosted_images=None,
@@ -864,6 +873,7 @@ def _(rid, params: dict) -> dict:
         return _slot_refusal(rid, sid, session, text, params, limit_message, internal_hosted_submit)
     # Rewritten every submit: a session alternates app window / HUD / live voice; a stale value misinforms.
     session["client_surface"] = params.get("surface") if params.get("surface") in _CLIENT_SURFACES else ""
+    _stash_caller_pane(session, params)
     # Live-voice delegations carry the recent spoken transcript for the MODEL INPUT only (the persisted
     # user row stays the words the user said); anything else clears it.
     voice_context = params.get("voice_context")

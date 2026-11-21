@@ -343,10 +343,24 @@ class GatewayChatView:
     async def submit(self, text):
         self.mutations.retire(self.session_id)
         sid, gaps = self.session_id, self.gaps
-        receipt = await self.client.rpc("prompt.submit", session_id=self.session_id,
-                                        input_id=uuid.uuid4().hex, text=text,
-                                        **({"finite": True} if self.finite else {}),
-                                        **({"unattended": True} if self.finite and self.unattended else {}))
+        from hermes_cli.gateway_client import (
+            GatewayRPCError,
+            caller_pane_param,
+            caller_pane_rejected,
+            without_caller_pane,
+        )
+        params = {"session_id": self.session_id, "input_id": uuid.uuid4().hex, "text": text,
+                  **caller_pane_param(),
+                  **({"finite": True} if self.finite else {}),
+                  **({"unattended": True} if self.finite and self.unattended else {})}
+        try:
+            receipt = await self.client.rpc("prompt.submit", **params)
+        except GatewayRPCError as exc:
+            # An owner older than the caller_pane contract refuses at validation, before any
+            # admission: replay once without the advisory pane instead of failing the prompt.
+            if not (params.get("caller_pane") and caller_pane_rejected(exc)):
+                raise
+            receipt = await self.client.rpc("prompt.submit", **without_caller_pane(params))
         if (receipt or {}).get("voice_stopped") is True:
             # TUI-26: a bare stop phrase typed into this LOCAL session's voice chat (another viewer
             # turned it on) ended the chat on the owner; nothing was admitted and no turn follows.

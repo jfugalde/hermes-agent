@@ -1,0 +1,10 @@
+name: herdr-agent-report
+version: 1.0.0
+description: "Report this Hermes pane's turn lifecycle to a local Herdr server via the built-in `herdr pane report-agent` API (source=hermes-agent-report, agent=hermes-report — an agent label Herdr does not own, because herdr 0.9.x silently never applies state reports sent with an agent name its own `hermes` integration claims, and the hermes detection manifest aliases the name `hermes-agent`, so that label is dropped the same way): working at turn start, blocked while an approval/question is pending, idle when the turn settles, and release-agent on true session end. Hermes renders near-identical footers when working and idle, so Herdr's screen-detection manifest cannot classify Hermes panes; this plugin reports the state directly from hook boundaries instead. Gated on HERDR_ENV=1 + HERDR_PANE_ID (Herdr-injected pane env); subprocess calls are fire-and-forget (timeout 1s, output discarded) and never raise into the hook bus."
+author: "NousResearch"
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+  - pre_approval_request
+  - post_approval_response
+  - on_session_finalize

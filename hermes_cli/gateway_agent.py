@@ -18,7 +18,12 @@ import time
 import uuid
 from contextlib import suppress
 
-from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
+from hermes_cli.gateway_client import (
+    GatewayClientError,
+    GatewayRPCError,
+    caller_pane_rejected,
+    without_caller_pane,
+)
 from hermes_cli.gateway_connection import DISCONNECTED, NOT_SENT, CallStopped, lost_before
 
 logger = logging.getLogger(__name__)
@@ -681,6 +686,8 @@ class GatewayAgent:
                 persist_user_message = user_message
         text = persist_user_message if isinstance(persist_user_message, str) else user_message
         params = {"session_id": self.session_id, "submission_id": uuid.uuid4().hex, "text": text}
+        from hermes_cli.gateway_client import caller_pane_param
+        params.update(caller_pane_param())
         if attachments:
             params["attachments"] = attachments
         if isinstance(user_message, str) and user_message != text:
@@ -777,7 +784,15 @@ class GatewayAgent:
                 params = self._submit_params(user_message, persist_user_message, turn_author)
                 if self._stop(turn)():
                     raise CallStopped("prompt.submit")
-                receipt = self.connection.call("prompt.submit", **{**params, "session_id": turn.session_id})
+                try:
+                    receipt = self.connection.call("prompt.submit", **{**params, "session_id": turn.session_id})
+                except GatewayRPCError as exc:
+                    # An owner older than the caller_pane contract refuses at validation, before any
+                    # admission: replay once without the advisory pane instead of failing the turn.
+                    if not (params.get("caller_pane") and caller_pane_rejected(exc)):
+                        raise
+                    receipt = self.connection.call(
+                        "prompt.submit", **{**without_caller_pane(params), "session_id": turn.session_id})
             except CallStopped:  # main moved on (a later turn, /new, Ctrl-C's bound) before the submit
                 self._give_back_turn_route()  # nothing was sent: the pick is still owed
                 return self._failed(history, user_message, "Stopped before the prompt was sent; nothing was sent.")

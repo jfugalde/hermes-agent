@@ -823,6 +823,7 @@ def _collect_pre_llm_call_context(
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            pane_id=getattr(agent, "_caller_pane", None) or "",
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
