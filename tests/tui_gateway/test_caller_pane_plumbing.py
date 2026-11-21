@@ -55,6 +55,36 @@ class TestCallerPaneContract:
             PromptSubmitParams.model_validate({"session_id": "sW:s1", "text": "hi", "pane_id": PANE})
 
 
+class TestCallerPaneCanonicalSubmit:
+    """The CLI's ``-z`` oneshot submits through the CANONICAL ``prompt.submit`` contract, not the
+    standalone ``prompt_voice`` one: ``Params`` forbids unknown keys, so a field added only to the
+    standalone model makes every in-pane turn fail with ``invalid_params``. Guard the canonical model
+    itself and the live registration, so the two can never drift again."""
+
+    def test_canonical_submit_accepts_caller_pane(self):
+        from tui_gateway.contracts.canonical_sessions import CanonicalSubmitParams
+
+        assert CanonicalSubmitParams(session_id="sW:s1", text="hi").caller_pane is None
+        assert CanonicalSubmitParams(
+            session_id="sW:s1", text="hi", caller_pane=PANE).caller_pane == PANE
+        with pytest.raises(ValidationError):
+            CanonicalSubmitParams.model_validate(
+                {"session_id": "sW:s1", "text": "hi", "pane_id": PANE})
+
+    def test_registered_prompt_submit_model_carries_caller_pane(self):
+        from tui_gateway.contracts import canonical_sessions
+        from tui_gateway.contracts.registry import CANONICAL_METHODS
+
+        assert canonical_sessions.CanonicalSubmitParams is CANONICAL_METHODS["prompt.submit"].params
+
+        params_model = CANONICAL_METHODS["prompt.submit"].params
+        assert "caller_pane" in params_model.model_fields
+        # And the real wire payload the CLI sends validates against the registered model.
+        validated = params_model.model_validate(
+            {"session_id": "sW:s1", "text": "hi", "caller_pane": PANE})
+        assert validated.model_dump()["caller_pane"] == PANE
+
+
 class TestCallerPaneParam:
     def test_empty_outside_herdr(self, monkeypatch):
         from hermes_cli.gateway_client import caller_pane_param

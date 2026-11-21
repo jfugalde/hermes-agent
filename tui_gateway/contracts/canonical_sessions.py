@@ -211,6 +211,12 @@ class CanonicalSubmitParams(CanonicalSessionParams):
     submission_id: str | None = None
     input_id: str | None = None
     queued: bool = False
+    # The submitting CLI client's terminal pane when it runs inside a Herdr pane (``HERDR_ENV=1``),
+    # forwarded by ``hermes_cli.gateway_client.caller_pane_param``. Information only: the submit
+    # handler stashes it per admission (``session['caller_pane']``) and the per-turn binding hands it
+    # to hooks as ``pane_id`` so gateway-side plugins can report agent state to that pane. The gateway
+    # process itself has no HERDR_* env. Truncated to 64 chars on stash.
+    caller_pane: str | None = None
     attachments: list[CanonicalAttachment] | None = None
     finite: bool = False
     unattended: bool = False

@@ -5178,6 +5178,7 @@ export interface CanonicalSubmitParams {
   submission_id?: string | null
   input_id?: string | null
   queued?: boolean
+  caller_pane?: string | null
   attachments?: CanonicalAttachment[] | null
   finite?: boolean
   unattended?: boolean

@@ -11068,6 +11068,18 @@
             "title": "Queued",
             "type": "boolean"
           },
+          "caller_pane": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caller Pane"
+          },
           "attachments": {
             "anyOf": [
               {
