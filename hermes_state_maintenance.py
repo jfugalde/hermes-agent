@@ -384,9 +384,16 @@ class SessionMaintenanceMixin:
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
                 session_ids -= self._guarded_ids(conn, session_ids)
-            from hermes_state_mutation_retirement import prune_retired_tombstones, retire_prunable
+            from hermes_state_mutation_retirement import (
+                prune_admission_results, prune_retired_tombstones, retire_prunable)
             session_ids = retire_prunable(conn, sorted(session_ids))
             prune_retired_tombstones(conn)  # every prune pass also reclaims expired deletion tombstones
+            # Bounded settled-turn receipts: sessions idle past the exact-retry horizon, then the
+            # per-session cap. Runs on every prune pass (user deletes included) so a store whose
+            # auto-prune is off still stays bounded on its next explicit prune.
+            reclaimed = prune_admission_results(conn)
+            if reclaimed:
+                logger.info("state.db prune: reclaimed %d settled-turn admission result row(s)", reclaimed)
             if not session_ids:
                 return 0
             # Batched: a cron-heavy store prunes tens of thousands of ids in one call.

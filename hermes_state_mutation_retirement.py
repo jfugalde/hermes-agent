@@ -400,6 +400,14 @@ def fence_shared_routes(conn, namespace, session_ids, *, expiring=()):
 
 
 RETRY_HORIZON_S = 7 * 86400  # exact-retry horizon: a retry within it gets the byte-exact settled reply
+# Bound on stored settled-turn receipts (gateway.admission.result.v1.*) per still-active target
+# session. 64 exceeds one full ADMISSION_QUEUE_MAX queue's worth of settles in a single drain plus
+# its steering transfers, so every receipt a same-session retry can normally reach survives; only a
+# session that settles more turns than this between passes loses older receipts, and they degrade
+# exactly like expired deletion-tombstone receipts (never wrong data). The horizon above remains
+# the primary receipt bound; this cap only stops one long-lived session from growing the family
+# without limit, because its receipts never age out while the session stays active.
+ADMISSION_RESULT_MAX_PER_SESSION = 64
 _EXPIRED = "json_valid(value) AND json_extract(value, '$.retired_at') < ?"
 
 
@@ -431,3 +439,43 @@ def prune_retired_tombstones(conn, older_than=RETRY_HORIZON_S):
     conn.execute(f'DELETE FROM state_meta WHERE key GLOB ? AND {_EXPIRED}', (WORKER_PREFIX + '*', cutoff))
     for prefix in (RETIRED_PREFIX, ROUTE_FENCE_PREFIX):
         _reclaim_expired(conn, prefix, cutoff)
+
+
+def prune_admission_results(conn, older_than=RETRY_HORIZON_S,
+                            max_per_session=ADMISSION_RESULT_MAX_PER_SESSION):
+    """Reclaim settled-turn receipts (``gateway.admission.result.v1.*``) past the exact-retry horizon.
+
+    Every settled turn stores its receipt and, while the target session stays alive, nothing ever
+    removed them — a daily-driver session grew state_meta by a full receipt per turn. (Deletion's
+    tombstone path above reclaims the receipts of retired sessions; this covers the ones attached
+    to sessions that survive.) Two bounds, neither touching a reader:
+
+    1. Horizon: a receipt is replayed while a retry of the same submission_id expects the byte-exact
+       settled reply — the same ``RETRY_HORIZON_S`` window the deletion tombstones keep. There is no
+       per-row settle stamp, but a row's settle time never exceeds its target session's last
+       activity, so a session inactive longer than the horizon holds no receipt younger than the
+       horizon: deleting its receipts never evicts one still inside the replay window.
+       ``COALESCE(last_activity_at, started_at)`` keeps the proxy conservative when activity was
+       never recorded.
+    2. Cap: a session that keeps running never ages out by the horizon, so an active session keeps
+       only its newest ``max_per_session`` receipts (see the constant's comment for why 64 is wide
+       enough). A receipt beyond the cap degrades exactly like one past the horizon on a deleted
+       session: a bot receipt goes ambiguous (never re-answered), a settled API run reports its
+       outcome without the payload — an honest miss, never wrong data.
+
+    Returns the number of receipt rows reclaimed.
+    """
+    from hermes_state_terminal import RESULT_PREFIX
+    cutoff = time.time() - older_than
+    # 1. Sessions idle beyond the horizon: every receipt behind them settled that long ago.
+    reaped = conn.execute(
+        'DELETE FROM state_meta WHERE key IN (SELECT ?1 || a.admission_id FROM session_admissions a '
+        'JOIN sessions s ON s.id = a.target_session_id '
+        'WHERE COALESCE(s.last_activity_at, s.started_at) < ?2)', (RESULT_PREFIX, cutoff)).rowcount
+    # 2. The newest receipts of each session survive, oldest first, whatever the session's age.
+    reaped += conn.execute(
+        'DELETE FROM state_meta WHERE key IN (SELECT ?1 || a.admission_id FROM session_admissions a '
+        'WHERE a.seq <= (SELECT COALESCE(MAX(x.seq), 0) - ?2 FROM session_admissions x '
+        'WHERE x.target_session_id = a.target_session_id))',
+        (RESULT_PREFIX, max_per_session)).rowcount
+    return reaped
